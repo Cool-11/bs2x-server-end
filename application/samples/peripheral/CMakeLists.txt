@@ -117,7 +117,13 @@ endif()
 if(DEFINED CONFIG_SAMPLE_SUPPORT_CLOCKS)
     add_subdirectory_if_exist(clocks)
 endif()
+
 if(DEFINED CONFIG_SAMPLE_SUPPORT_SLE_ONE_TO_MANY)
     add_subdirectory_if_exist(sle_one_to_many)
 endif()
+
+if(DEFINED CONFIG_SAMPLE_SUPPORT_MY_PROJECT_2X)
+    add_subdirectory_if_exist(My_project_2x)
+endif()
+
 set(SOURCES "${SOURCES}" PARENT_SCOPE)

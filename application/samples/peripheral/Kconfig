@@ -418,3 +418,4 @@ menu "WATCHDOG Sample Configuration"
     osource "application/samples/peripheral/watchdog/Kconfig"
 endmenu
 endif
+osource "application/samples/peripheral/My_project_2x/Kconfig"

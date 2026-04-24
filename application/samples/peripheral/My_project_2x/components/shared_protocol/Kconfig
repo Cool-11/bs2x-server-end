@@ -1,0 +1,6 @@
+# My_project_2x shared_protocol
+
+config MY_PROJECT_2X_SHARED_PROTOCOL_ENABLE
+    bool "Enable shared_protocol component"
+    default y
+    depends on SAMPLE_SUPPORT_MY_PROJECT_2X

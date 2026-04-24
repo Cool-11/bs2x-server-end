@@ -1,0 +1,35 @@
+menuconfig SAMPLE_SUPPORT_MY_PROJECT_2X
+    bool "Support My_project_2x (WS63 componentized tag)"
+    default n
+    depends on ENABLE_PERIPHERAL_SAMPLE
+
+if SAMPLE_SUPPORT_MY_PROJECT_2X
+
+menu "My_project_2x Configuration"
+
+config MY_PROJECT_2X_LED_GPIO
+    int "LED GPIO number"
+    default 0
+    help
+        GPIO number for LED output.
+
+config MY_PROJECT_2X_BEEP_GPIO
+    int "BEEP GPIO number"
+    default 1
+    help
+        GPIO number for buzzer/beep output.
+
+config MY_PROJECT_2X_BEEP_AUTO_OFF_MS
+    int "Beep auto-off timeout (ms)"
+    default 15000
+    range 1000 60000
+    help
+        Safety timeout to prevent battery drain. Must auto-off even if link is lost.
+
+endmenu
+
+osource "application/samples/peripheral/My_project_2x/components/shared_protocol/Kconfig"
+osource "application/samples/peripheral/My_project_2x/components/hardware_hal/Kconfig"
+osource "application/samples/peripheral/My_project_2x/components/sle_slave/Kconfig"
+
+endif # SAMPLE_SUPPORT_MY_PROJECT_2X

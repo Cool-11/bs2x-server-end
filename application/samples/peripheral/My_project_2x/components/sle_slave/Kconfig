@@ -1,0 +1,6 @@
+# My_project_2x sle_slave
+
+config MY_PROJECT_2X_SLE_SLAVE_ENABLE
+    bool "Enable sle_slave component"
+    default y
+    depends on SAMPLE_SUPPORT_MY_PROJECT_2X

@@ -1,0 +1,6 @@
+# My_project_2x hardware_hal
+
+config MY_PROJECT_2X_HARDWARE_HAL_ENABLE
+    bool "Enable hardware_hal component"
+    default y
+    depends on SAMPLE_SUPPORT_MY_PROJECT_2X
