@@ -7,32 +7,15 @@
 #include "shared_protocol.h"
 #include "sle_slave_mgr.h"
 #include "soc_osal.h"
+#include "storage_sync.h"
 
-#define MY_PROJECT_2X_LOG "[my2x app]"
+#define MY_PROJECT_2X_LOG "[BS2x_INIT]"
 #define MY_PROJECT_2X_FIND_MS 15000u
 #define MY_PROJECT_2X_WORK_TO_STANDBY_MS 0xFFFFFFFFu
 #define MY_PROJECT_2X_STANDBY_TO_SLEEP_MS 0xFFFFFFFFu
 #define MY_PROJECT_2X_DEFAULT_TAG_ID 1u
 #define MY_PROJECT_2X_DEFAULT_QTY 0u
 #define MY_PROJECT_2X_DEFAULT_BATTERY 100u
-
-static shared_proto_adv_field_t g_adv_field = {
-    .magic = SHARED_PROTO_MAGIC,
-    .tag_id = MY_PROJECT_2X_DEFAULT_TAG_ID,
-    .qty = MY_PROJECT_2X_DEFAULT_QTY,
-    .status = 0,
-    .battery = MY_PROJECT_2X_DEFAULT_BATTERY,
-    .seq = 0,
-};
-
-static void my_project_2x_refresh_adv(void)
-{
-    g_adv_field.seq++;
-    errcode_t ret = sle_slave_refresh_adv_payload(&g_adv_field);
-    if (ret != ERRCODE_SLE_SUCCESS) {
-        osal_printk("%s refresh adv fail:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
-    }
-}
 
 static void my_project_2x_on_unicast_cmd(const shared_proto_unicast_cmd_t *cmd)
 {
@@ -44,17 +27,28 @@ static void my_project_2x_on_unicast_cmd(const shared_proto_unicast_cmd_t *cmd)
 
     switch (cmd->action) {
         case SHARED_PROTO_ACTION_FIND_ME:
-            osal_printk("%s find-me cmd\r\n", MY_PROJECT_2X_LOG);
+            osal_printk("[BS2x_SLE] Received SSAP Write, Value: 0x%02x\r\n", SHARED_PROTO_CMD_FIND_ME);
             (void)hardware_hal_beep_on_for_ms(MY_PROJECT_2X_FIND_MS);
             (void)hardware_hal_led_on_for_ms(MY_PROJECT_2X_FIND_MS);
+            (void)storage_sync_set_find_status(true);
+            (void)storage_sync_publish();
+            break;
+        case SHARED_PROTO_ACTION_STOP_FIND:
+            osal_printk("[BS2x_SLE] Received SSAP Write, Value: 0x%02x\r\n", SHARED_PROTO_CMD_STOP_FIND);
+            (void)hardware_hal_beep_off();
+            (void)hardware_hal_led_off();
+            (void)storage_sync_set_find_status(false);
+            (void)storage_sync_publish();
             break;
         case SHARED_PROTO_ACTION_UPDATE_QTY:
-            osal_printk("%s update qty:%u\r\n", MY_PROJECT_2X_LOG, cmd->qty);
-            g_adv_field.qty = cmd->qty;
-            my_project_2x_refresh_adv();
+            osal_printk("[BS2x_SLE] Received SSAP Write, Value: 0x%02x qty:%u\r\n",
+                        SHARED_PROTO_CMD_UPDATE_QTY,
+                        cmd->qty);
+            (void)storage_sync_set_qty(cmd->qty);
+            (void)storage_sync_publish();
             break;
         default:
-            osal_printk("%s unknown cmd:%u\r\n", MY_PROJECT_2X_LOG, cmd->action);
+            osal_printk("[BS2x_SLE] unknown cmd action:%u\r\n", cmd->action);
             break;
     }
 }
@@ -62,12 +56,14 @@ static void my_project_2x_on_unicast_cmd(const shared_proto_unicast_cmd_t *cmd)
 static int32_t my_project_2x_work_to_standby(uintptr_t arg)
 {
     unused(arg);
+    osal_printk("%s work->standby\r\n", MY_PROJECT_2X_LOG);
     return 0;
 }
 
 static int32_t my_project_2x_standby_to_sleep(uintptr_t arg)
 {
     unused(arg);
+    osal_printk("%s standby->sleep\r\n", MY_PROJECT_2X_LOG);
     (void)sle_slave_stop();
     return 0;
 }
@@ -75,6 +71,7 @@ static int32_t my_project_2x_standby_to_sleep(uintptr_t arg)
 static int32_t my_project_2x_standby_to_work(uintptr_t arg)
 {
     unused(arg);
+    osal_printk("%s standby->work\r\n", MY_PROJECT_2X_LOG);
     (void)sle_slave_start();
     return 0;
 }
@@ -82,6 +79,7 @@ static int32_t my_project_2x_standby_to_work(uintptr_t arg)
 static int32_t my_project_2x_sleep_to_work(uintptr_t arg)
 {
     unused(arg);
+    osal_printk("%s sleep->work\r\n", MY_PROJECT_2X_LOG);
     (void)sle_slave_start();
     return 0;
 }
@@ -110,7 +108,7 @@ static void my_project_2x_pm_init(void)
 
 static void my_project_2x_entry(void)
 {
-    osal_printk("%s start\r\n", MY_PROJECT_2X_LOG);
+    osal_printk("%s Entering my_project_2x_entry\r\n", MY_PROJECT_2X_LOG);
 
     my_project_2x_pm_init();
 
@@ -122,10 +120,27 @@ static void my_project_2x_entry(void)
         .on_unicast_cmd = my_project_2x_on_unicast_cmd,
     };
 
-    (void)sle_slave_refresh_adv_payload(&g_adv_field);
     errcode_t ret = sle_slave_init(&slave_cb);
     if (ret != ERRCODE_SLE_SUCCESS) {
         osal_printk("%s sle init fail:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
+        return;
+    }
+
+    storage_sync_adapter_t adapter = {
+        .refresh_adv_cb = sle_slave_refresh_adv_payload,
+    };
+    ret = storage_sync_init(MY_PROJECT_2X_DEFAULT_TAG_ID,
+                            MY_PROJECT_2X_DEFAULT_QTY,
+                            MY_PROJECT_2X_DEFAULT_BATTERY,
+                            &adapter);
+    if (ret != ERRCODE_SUCC) {
+        osal_printk("%s storage_sync_init fail:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
+        return;
+    }
+
+    ret = storage_sync_publish();
+    if (ret != ERRCODE_SUCC) {
+        osal_printk("%s initial publish fail:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
     }
 }
 

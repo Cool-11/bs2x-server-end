@@ -19,6 +19,8 @@
 #define CONFIG_MY_PROJECT_2X_BEEP_GPIO 1
 #endif
 
+#define HW_HAL_LOG "[BS2x_HAL]"
+
 typedef struct {
     timer_handle_t timer;
     bool initialized;
@@ -34,17 +36,22 @@ static void hw_hal_force_all_off(void)
     (void)uapi_gpio_set_val((pin_t)CONFIG_MY_PROJECT_2X_LED_GPIO, GPIO_LEVEL_LOW);
     g_hw.beep_on = false;
     g_hw.led_on = false;
+    osal_printk("%s gpio forced off\r\n", HW_HAL_LOG);
 }
 
 static void hw_hal_auto_off_timer_cb(uintptr_t data)
 {
     unused(data);
+    osal_printk("%s timer timeout, force off in ISR\r\n", HW_HAL_LOG);
     hw_hal_force_all_off();
 }
 
 hw_hal_status_t hardware_hal_init(void)
 {
+    osal_printk("%s Entering hardware_hal_init\r\n", HW_HAL_LOG);
+
     if (g_hw.initialized) {
+        osal_printk("%s already initialized\r\n", HW_HAL_LOG);
         return HW_HAL_OK;
     }
 
@@ -56,10 +63,15 @@ hw_hal_status_t hardware_hal_init(void)
 
     errcode_t ret = uapi_timer_create(TIMER_INDEX_0, &g_hw.timer);
     if (ret != ERRCODE_SUCC) {
+        osal_printk("%s timer create failed ret=0x%x\r\n", HW_HAL_LOG, ret);
         return HW_HAL_ERR_OS;
     }
 
     g_hw.initialized = true;
+    osal_printk("%s init done led_gpio=%d beep_gpio=%d\r\n",
+                HW_HAL_LOG,
+                CONFIG_MY_PROJECT_2X_LED_GPIO,
+                CONFIG_MY_PROJECT_2X_BEEP_GPIO);
     return HW_HAL_OK;
 }
 
@@ -83,14 +95,19 @@ static hw_hal_status_t hw_hal_start_auto_off(uint32_t ms)
     errcode_t ret = uapi_timer_start(g_hw.timer, time_us, hw_hal_auto_off_timer_cb, 0);
     if (ret != ERRCODE_SUCC) {
         hw_hal_force_all_off();
+        osal_printk("%s timer start failed ret=0x%x\r\n", HW_HAL_LOG, ret);
         return HW_HAL_ERR_OS;
     }
+
+    osal_printk("%s Timer started for %u ms auto-off.\r\n", HW_HAL_LOG, ms);
 
     return HW_HAL_OK;
 }
 
 hw_hal_status_t hardware_hal_beep_on_for_ms(uint32_t ms)
 {
+    osal_printk("%s beep on request ms=%u\r\n", HW_HAL_LOG, ms);
+
     if (hardware_hal_init() != HW_HAL_OK) {
         return HW_HAL_ERR_OS;
     }
@@ -109,6 +126,8 @@ hw_hal_status_t hardware_hal_beep_on_for_ms(uint32_t ms)
 
 hw_hal_status_t hardware_hal_beep_off(void)
 {
+    osal_printk("%s beep off\r\n", HW_HAL_LOG);
+
     if (!g_hw.initialized) {
         return HW_HAL_OK;
     }
@@ -125,6 +144,8 @@ hw_hal_status_t hardware_hal_beep_off(void)
 
 hw_hal_status_t hardware_hal_led_on_for_ms(uint32_t ms)
 {
+    osal_printk("%s led on request ms=%u\r\n", HW_HAL_LOG, ms);
+
     if (hardware_hal_init() != HW_HAL_OK) {
         return HW_HAL_ERR_OS;
     }
@@ -143,6 +164,8 @@ hw_hal_status_t hardware_hal_led_on_for_ms(uint32_t ms)
 
 hw_hal_status_t hardware_hal_led_off(void)
 {
+    osal_printk("%s led off\r\n", HW_HAL_LOG);
+
     if (!g_hw.initialized) {
         return HW_HAL_OK;
     }

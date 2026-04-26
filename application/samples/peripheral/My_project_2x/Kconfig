@@ -31,5 +31,6 @@ endmenu
 osource "application/samples/peripheral/My_project_2x/components/shared_protocol/Kconfig"
 osource "application/samples/peripheral/My_project_2x/components/hardware_hal/Kconfig"
 osource "application/samples/peripheral/My_project_2x/components/sle_slave/Kconfig"
+osource "application/samples/peripheral/My_project_2x/components/storage_sync/Kconfig"
 
 endif # SAMPLE_SUPPORT_MY_PROJECT_2X

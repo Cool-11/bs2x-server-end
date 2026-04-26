@@ -1,0 +1,6 @@
+# My_project_2x storage_sync
+
+config MY_PROJECT_2X_STORAGE_SYNC_ENABLE
+    bool "Enable storage_sync component"
+    default y
+    depends on SAMPLE_SUPPORT_MY_PROJECT_2X

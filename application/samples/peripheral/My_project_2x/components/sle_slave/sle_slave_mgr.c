@@ -13,7 +13,7 @@
 #define CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE 1
 #endif
 
-#define SLE_SLAVE_LOG "[my2x sle_slave]"
+#define SLE_SLAVE_LOG "[BS2x_SLE]"
 #define SLE_ADV_DATA_LEN_MAX_LOCAL 251u
 #define SLE_ADV_AD_TYPE_MANUFACTURER_SPECIFIC_DATA 0xFFu
 #define SLE_ADV_MANUFACTURER_ID_L 0x5Au
@@ -32,7 +32,10 @@ static uint16_t g_adv_payload_len = 0;
 
 static errcode_t sle_slave_encode_manufacturer_adv(const shared_proto_adv_field_t *field)
 {
+    osal_printk("%s Entering sle_slave_encode_manufacturer_adv\r\n", SLE_SLAVE_LOG);
+
     if (field == NULL || !shared_proto_adv_field_is_valid(field)) {
+        osal_printk("%s adv field invalid\r\n", SLE_SLAVE_LOG);
         return ERRCODE_SLE_PARAM_ERR;
     }
 
@@ -79,8 +82,14 @@ static void ssaps_server_write_request_cbk(uint8_t server_id, uint16_t conn_id, 
     unused(status);
 
     if (write_cb_para == NULL || write_cb_para->value == NULL || write_cb_para->length == 0) {
+        osal_printk("%s write cb invalid param\r\n", SLE_SLAVE_LOG);
         return;
     }
+
+    osal_printk("%s Received SSAP Write len:%u first:0x%02x\r\n",
+                SLE_SLAVE_LOG,
+                write_cb_para->length,
+                write_cb_para->value[0]);
 
     shared_proto_unicast_cmd_t cmd = {0};
     if (!shared_proto_parse_unicast_cmd(write_cb_para->value, write_cb_para->length, &cmd)) {
@@ -104,6 +113,8 @@ static void ssaps_server_read_request_cbk(uint8_t server_id, uint16_t conn_id, s
 
 static errcode_t sle_slave_register_callbacks(void)
 {
+    osal_printk("%s Entering sle_slave_register_callbacks\r\n", SLE_SLAVE_LOG);
+
     sle_connection_callbacks_t conn_cbks = {0};
     conn_cbks.connect_state_changed_cb = sle_slave_connect_state_changed_cbk;
     errcode_t ret = sle_connection_register_callbacks(&conn_cbks);
@@ -126,6 +137,8 @@ static errcode_t sle_slave_register_callbacks(void)
 
 static errcode_t sle_slave_setup_announce(void)
 {
+    osal_printk("%s Entering sle_slave_setup_announce\r\n", SLE_SLAVE_LOG);
+
     sle_announce_param_t param = {0};
     param.announce_handle = (uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE;
     param.announce_mode = SLE_ANNOUNCE_MODE_CONNECTABLE_SCANABLE;
@@ -163,6 +176,8 @@ static errcode_t sle_slave_setup_announce(void)
 
 static errcode_t sle_slave_setup_ssap_server(void)
 {
+    osal_printk("%s Entering sle_slave_setup_ssap_server\r\n", SLE_SLAVE_LOG);
+
     sle_uuid_t app_uuid = { .len = 2, .uuid = {0x12, 0x34} };
     errcode_t ret = ssaps_register_server(&app_uuid, &g_server_id);
     if (ret != ERRCODE_SLE_SUCCESS) {
@@ -202,13 +217,13 @@ static errcode_t sle_slave_setup_ssap_server(void)
 
 static void sle_slave_power_on_cbk(uint8_t status)
 {
-    osal_printk("%s sle power on: %u\r\n", SLE_SLAVE_LOG, status);
+    osal_printk("[BS2x_INIT] sle power on: %u\r\n", status);
     enable_sle();
 }
 
 static void sle_slave_enable_cbk(uint8_t status)
 {
-    osal_printk("%s sle enable: %u\r\n", SLE_SLAVE_LOG, status);
+    osal_printk("[BS2x_INIT] sle enable: %u\r\n", status);
 
     (void)sle_slave_register_callbacks();
     (void)sle_slave_setup_ssap_server();
@@ -218,6 +233,8 @@ static void sle_slave_enable_cbk(uint8_t status)
 
 errcode_t sle_slave_init(const sle_slave_callbacks_t *cb)
 {
+    osal_printk("[BS2x_INIT] Entering sle_slave_init\r\n");
+
     if (cb != NULL) {
         g_cb = *cb;
     } else {
@@ -253,16 +270,20 @@ errcode_t sle_slave_init(const sle_slave_callbacks_t *cb)
 
 errcode_t sle_slave_start(void)
 {
+    osal_printk("%s start announce\r\n", SLE_SLAVE_LOG);
     return sle_start_announce((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE);
 }
 
 errcode_t sle_slave_stop(void)
 {
+    osal_printk("%s stop announce\r\n", SLE_SLAVE_LOG);
     return sle_stop_announce((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE);
 }
 
 errcode_t sle_slave_refresh_adv_payload(const shared_proto_adv_field_t *field)
 {
+    osal_printk("%s refresh adv payload\r\n", SLE_SLAVE_LOG);
+
     errcode_t ret = sle_slave_encode_manufacturer_adv(field);
     if (ret != ERRCODE_SLE_SUCCESS) {
         return ret;

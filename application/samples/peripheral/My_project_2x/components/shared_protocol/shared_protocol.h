@@ -8,11 +8,12 @@
 extern "C" {
 #endif
 
-#define SHARED_PROTO_MAGIC 0x534C4550u
+#define SHARED_PROTO_MAGIC 0xAABBCCDDu
 #define SHARED_PROTO_ADV_FIELD_LEN 12u
 
 #define SHARED_PROTO_CMD_FIND_ME 0x01u
-#define SHARED_PROTO_CMD_UPDATE_QTY 0x55u
+#define SHARED_PROTO_CMD_STOP_FIND 0x00u
+#define SHARED_PROTO_CMD_UPDATE_QTY 0x10u
 
 #pragma pack(push, 1)
 typedef struct {
@@ -30,6 +31,7 @@ _Static_assert(sizeof(shared_proto_adv_field_t) == SHARED_PROTO_ADV_FIELD_LEN,
 
 typedef enum {
     SHARED_PROTO_ACTION_NONE = 0,
+    SHARED_PROTO_ACTION_STOP_FIND,
     SHARED_PROTO_ACTION_FIND_ME,
     SHARED_PROTO_ACTION_UPDATE_QTY,
 } shared_proto_action_t;
