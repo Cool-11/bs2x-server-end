@@ -22,7 +22,8 @@
 #define SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET 4u
 
 static sle_slave_callbacks_t g_cb = {0};
-static uint16_t g_conn_id = 0;
+static uint16_t g_conn_ids[CONFIG_MY_PROJECT_2X_MAX_CONNECTIONS] = {0};
+static uint8_t g_active_conn_count = 0;
 static uint8_t g_server_id = 0;
 static uint16_t g_service_handle = 0;
 static uint16_t g_property_handle = 0;
@@ -59,18 +60,58 @@ static errcode_t sle_slave_encode_manufacturer_adv(const shared_proto_adv_field_
     return ERRCODE_SLE_SUCCESS;
 }
 
+static void sle_slave_add_connection(uint16_t conn_id)
+{
+    for (uint8_t i = 0; i < CONFIG_MY_PROJECT_2X_MAX_CONNECTIONS; i++) {
+        if (g_conn_ids[i] == conn_id) {
+            osal_printk("%s conn_id 0x%x already in list\r\n", SLE_SLAVE_LOG, conn_id);
+            return;
+        }
+        if (g_conn_ids[i] == 0) {
+            g_conn_ids[i] = conn_id;
+            g_active_conn_count++;
+            osal_printk("%s added conn_id 0x%x at slot %u, active_count=%u\r\n",
+                        SLE_SLAVE_LOG, conn_id, i, g_active_conn_count);
+            return;
+        }
+    }
+    osal_printk("%s connection list full, rejecting conn_id 0x%x\r\n", SLE_SLAVE_LOG, conn_id);
+}
+
+static void sle_slave_remove_connection(uint16_t conn_id)
+{
+    for (uint8_t i = 0; i < CONFIG_MY_PROJECT_2X_MAX_CONNECTIONS; i++) {
+        if (g_conn_ids[i] == conn_id) {
+            g_conn_ids[i] = 0;
+            if (g_active_conn_count > 0) {
+                g_active_conn_count--;
+            }
+            osal_printk("%s removed conn_id 0x%x from slot %u, active_count=%u\r\n",
+                        SLE_SLAVE_LOG, conn_id, i, g_active_conn_count);
+            return;
+        }
+    }
+    osal_printk("%s conn_id 0x%x not found in list\r\n", SLE_SLAVE_LOG, conn_id);
+}
+
 static void sle_slave_connect_state_changed_cbk(uint16_t conn_id, const sle_addr_t *addr,
                                                 sle_acb_state_t conn_state, sle_pair_state_t pair_state,
                                                 sle_disc_reason_t disc_reason)
 {
     unused(addr);
     unused(pair_state);
-    osal_printk("%s conn_state:0x%x disc:0x%x conn_id:0x%x\r\n", SLE_SLAVE_LOG, conn_state, disc_reason, conn_id);
+    osal_printk("%s conn_id:0x%x state:0x%x disc:0x%x\r\n", SLE_SLAVE_LOG, conn_id, conn_state, disc_reason);
 
     if (conn_state == SLE_ACB_STATE_CONNECTED) {
-        g_conn_id = conn_id;
+        sle_slave_add_connection(conn_id);
+        if (g_cb.on_conn_state_changed != NULL) {
+            g_cb.on_conn_state_changed(conn_id, true);
+        }
     } else if (conn_state == SLE_ACB_STATE_DISCONNECTED) {
-        g_conn_id = 0;
+        sle_slave_remove_connection(conn_id);
+        if (g_cb.on_conn_state_changed != NULL) {
+            g_cb.on_conn_state_changed(conn_id, false);
+        }
     }
 }
 
@@ -78,7 +119,6 @@ static void ssaps_server_write_request_cbk(uint8_t server_id, uint16_t conn_id, 
                                            errcode_t status)
 {
     unused(server_id);
-    unused(conn_id);
     unused(status);
 
     if (write_cb_para == NULL || write_cb_para->value == NULL || write_cb_para->length == 0) {
@@ -86,10 +126,8 @@ static void ssaps_server_write_request_cbk(uint8_t server_id, uint16_t conn_id, 
         return;
     }
 
-    osal_printk("%s Received SSAP Write len:%u first:0x%02x\r\n",
-                SLE_SLAVE_LOG,
-                write_cb_para->length,
-                write_cb_para->value[0]);
+    osal_printk("%s Received SSAP Write conn_id:0x%x len:%u first:0x%02x\r\n",
+                SLE_SLAVE_LOG, conn_id, write_cb_para->length, write_cb_para->value[0]);
 
     shared_proto_unicast_cmd_t cmd = {0};
     if (!shared_proto_parse_unicast_cmd(write_cb_para->value, write_cb_para->length, &cmd)) {
@@ -286,23 +324,65 @@ errcode_t sle_slave_refresh_adv_payload(const shared_proto_adv_field_t *field)
 
     errcode_t ret = sle_slave_encode_manufacturer_adv(field);
     if (ret != ERRCODE_SLE_SUCCESS) {
+        osal_printk("%s encode adv failed ret:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
     }
 
     ret = sle_slave_setup_announce();
     if (ret != ERRCODE_SLE_SUCCESS) {
+        osal_printk("%s setup announce failed ret:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
     }
 
+    ret = sle_start_announce((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE);
+    if (ret != ERRCODE_SLE_SUCCESS) {
+        osal_printk("%s start announce failed ret:0x%x\r\n", SLE_SLAVE_LOG, ret);
+        return ret;
+    }
+
+    osal_printk("%s refresh adv payload ok\r\n", SLE_SLAVE_LOG);
     return ERRCODE_SLE_SUCCESS;
 }
 
 uint16_t sle_slave_get_conn_id(void)
 {
-    return g_conn_id;
+    return g_active_conn_count > 0 ? g_conn_ids[0] : 0;
 }
 
 bool sle_slave_is_connected(void)
 {
-    return g_conn_id != 0;
+    return g_active_conn_count > 0;
+}
+
+uint8_t sle_slave_get_active_conn_count(void)
+{
+    return g_active_conn_count;
+}
+
+errcode_t sle_slave_broadcast_notify_all(const uint8_t *data, uint16_t len)
+{
+    if (g_active_conn_count == 0 || data == NULL || len == 0) {
+        return ERRCODE_SLE_PARAM_ERR;
+    }
+
+    ssaps_ntf_ind_t param = {0};
+    param.handle = g_property_handle;
+    param.type = SSAP_PROPERTY_TYPE_VALUE;
+    param.value = (uint8_t *)data;
+    param.value_len = len;
+
+    errcode_t last_ret = ERRCODE_SLE_SUCCESS;
+    for (uint8_t i = 0; i < CONFIG_MY_PROJECT_2X_MAX_CONNECTIONS; i++) {
+        if (g_conn_ids[i] != 0) {
+            errcode_t ret = ssaps_notify_indicate(g_server_id, g_conn_ids[i], &param);
+            if (ret != ERRCODE_SLE_SUCCESS) {
+                osal_printk("%s notify failed conn_id:0x%x ret:0x%x\r\n",
+                            SLE_SLAVE_LOG, g_conn_ids[i], ret);
+                last_ret = ret;
+            } else {
+                osal_printk("%s notify ok conn_id:0x%x\r\n", SLE_SLAVE_LOG, g_conn_ids[i]);
+            }
+        }
+    }
+    return last_ret;
 }
