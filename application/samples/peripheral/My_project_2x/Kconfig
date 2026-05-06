@@ -1,7 +1,3 @@
-menuconfig SAMPLE_SUPPORT_MY_PROJECT_2X
-    bool "Support My_project_2x (WS63 componentized tag)"
-    default n
-    depends on ENABLE_PERIPHERAL_SAMPLE
 
 if SAMPLE_SUPPORT_MY_PROJECT_2X
 
@@ -9,13 +5,13 @@ menu "My_project_2x Configuration"
 
 config MY_PROJECT_2X_LED_GPIO
     int "LED GPIO number"
-    default 0
+    default 9
     help
         GPIO number for LED output.
 
 config MY_PROJECT_2X_BEEP_GPIO
     int "BEEP GPIO number"
-    default 1
+    default 8
     help
         GPIO number for buzzer/beep output.
 

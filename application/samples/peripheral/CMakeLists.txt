@@ -123,7 +123,8 @@ if(DEFINED CONFIG_SAMPLE_SUPPORT_SLE_ONE_TO_MANY)
 endif()
 
 if(DEFINED CONFIG_SAMPLE_SUPPORT_MY_PROJECT_2X)
-    add_subdirectory_if_exist(My_project_2x)
+    add_subdirectory_if_exist(My_project_2x)    
 endif()
 
 set(SOURCES "${SOURCES}" PARENT_SCOPE)
+set(PUBLIC_HEADER "${PUBLIC_HEADER}" PARENT_SCOPE)

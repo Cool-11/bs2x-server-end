@@ -34,6 +34,7 @@ config ENABLE_ALL_PERIPHERAL_SAMPLE
     select SAMPLE_SUPPORT_UART_DMA_LLI
     select SAMPLE_SUPPORT_WDT
     select SAMPLE_SUPPORT_SLE_ONE_TO_MANY
+    select SAMPLE_SUPPORT_My_project_2x
     help
         This option means enable all the sample of peripheral, it is just for build.
 
@@ -418,4 +419,17 @@ menu "WATCHDOG Sample Configuration"
     osource "application/samples/peripheral/watchdog/Kconfig"
 endmenu
 endif
-osource "application/samples/peripheral/My_project_2x/Kconfig"
+
+config SAMPLE_SUPPORT_MY_PROJECT_2X
+    bool
+    prompt "Support My_project_2x Sample."
+    default n
+    depends on ENABLE_PERIPHERAL_SAMPLE
+    help
+        This option means support My_project_2x Sample.
+
+if SAMPLE_SUPPORT_MY_PROJECT_2X
+menu "My_project_2x Sample Configuration"
+    osource "application/samples/peripheral/My_project_2x/Kconfig"
+endmenu
+endif

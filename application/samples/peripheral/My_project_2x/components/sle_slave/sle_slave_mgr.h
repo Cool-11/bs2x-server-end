@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 #include "errcode.h"
-#include "shared_protocol.h"
+#include "../shared_protocol/shared_protocol.h"
 #include "sle_common.h"
 
 #ifdef __cplusplus
@@ -16,7 +16,7 @@ extern "C" {
 #define CONFIG_MY_PROJECT_2X_MAX_CONNECTIONS 4
 #endif
 
-typedef void (*sle_slave_cmd_cb_t)(const shared_proto_unicast_cmd_t *cmd);
+typedef void (*sle_slave_cmd_cb_t)(uint16_t conn_id, const shared_proto_unicast_cmd_t *cmd);
 typedef void (*sle_slave_conn_cb_t)(uint16_t conn_id, bool connected);
 
 typedef struct {
@@ -36,6 +36,7 @@ bool sle_slave_is_connected(void);
 uint8_t sle_slave_get_active_conn_count(void);
 
 errcode_t sle_slave_broadcast_notify_all(const uint8_t *data, uint16_t len);
+errcode_t sle_slave_notify_conn(uint16_t conn_id, const uint8_t *data, uint16_t len);
 
 #ifdef __cplusplus
 }
