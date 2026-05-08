@@ -22,6 +22,31 @@ config MY_PROJECT_2X_BEEP_AUTO_OFF_MS
     help
         Safety timeout to prevent battery drain. Must auto-off even if link is lost.
 
+config MY_PROJECT_2X_PWM_PIN
+    int "PWM pin for passive buzzer"
+    default 20
+    help
+        GPIO pin number for PWM output to drive passive buzzer.
+
+config MY_PROJECT_2X_PWM_PIN_MODE
+    int "PWM pin multiplex mode"
+    default 40
+    help
+        Pin function mode for PWM output on the specified GPIO.
+
+config MY_PROJECT_2X_PWM_CHANNEL
+    int "PWM channel"
+    default 0
+    help
+        PWM channel number for buzzer output.
+
+config MY_PROJECT_2X_PWM_GROUP_ID
+    int "PWM group ID (V151 only)"
+    default 0
+    depends on PWM_USING_V151
+    help
+        PWM group ID when using V151 PWM controller.
+
 endmenu
 
 osource "application/samples/peripheral/My_project_2x/components/shared_protocol/Kconfig"

@@ -224,7 +224,14 @@ static void my_project_2x_send_inventory_rsp(uint16_t conn_id)
     osal_printk("%s[BP] inventory data tag:%u qty:%u status:0x%02x bat:%u seq:%u\r\n",
                 MY_PROJECT_2X_LOG, rsp.tag_id, rsp.qty, rsp.status, rsp.battery, rsp.seq);
 
-    errcode_t ret = sle_slave_notify_conn(conn_id, (const uint8_t *)&rsp, sizeof(rsp));
+    uint8_t buf[SHARED_PROTO_INVENTORY_RSP_SERIALIZED_LEN] = {0};
+    uint16_t len = shared_proto_serialize_inventory_rsp(&rsp, buf, sizeof(buf));
+    if (len == 0) {
+        osal_printk("%s[BP] inventory serialize FAIL\r\n", MY_PROJECT_2X_LOG);
+        return;
+    }
+
+    errcode_t ret = sle_slave_notify_conn(conn_id, buf, len);
     if (ret != ERRCODE_SUCC) {
         osal_printk("%s[BP] inventory notify FAIL ret:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
     } else {
@@ -242,7 +249,14 @@ static void my_project_2x_send_bind_rsp(uint16_t conn_id, uint16_t tag_id, bool 
     osal_printk("%s[BP] send_bind_rsp conn_id:0x%x cmd:0x%02x tag_id:%u\r\n",
                 MY_PROJECT_2X_LOG, conn_id, rsp.cmd, rsp.tag_id);
 
-    errcode_t ret = sle_slave_notify_conn(conn_id, (const uint8_t *)&rsp, sizeof(rsp));
+    uint8_t buf[SHARED_PROTO_BIND_RSP_SERIALIZED_LEN] = {0};
+    uint16_t len = shared_proto_serialize_bind_rsp(&rsp, buf, sizeof(buf));
+    if (len == 0) {
+        osal_printk("%s[BP] bind serialize FAIL\r\n", MY_PROJECT_2X_LOG);
+        return;
+    }
+
+    errcode_t ret = sle_slave_notify_conn(conn_id, buf, len);
     if (ret != ERRCODE_SUCC) {
         osal_printk("%s[BP] bind notify FAIL ret:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
     } else {
@@ -313,6 +327,8 @@ static int32_t my_project_2x_work_to_standby(uintptr_t arg)
 {
     unused(arg);
     osal_printk("%s[BP] PM work->standby\r\n", MY_PROJECT_2X_LOG);
+    (void)hardware_hal_beep_off();
+    (void)hardware_hal_led_off();
     return 0;
 }
 
@@ -320,6 +336,8 @@ static int32_t my_project_2x_standby_to_sleep(uintptr_t arg)
 {
     unused(arg);
     osal_printk("%s[BP] PM standby->sleep\r\n", MY_PROJECT_2X_LOG);
+    (void)hardware_hal_beep_off();
+    (void)hardware_hal_led_off();
     (void)sle_slave_stop();
     return 0;
 }

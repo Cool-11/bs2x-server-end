@@ -25,6 +25,10 @@ extern "C" {
 #define SHARED_PROTO_BIND_OK_RSP_LEN 3u
 #define SHARED_PROTO_BIND_FAIL_RSP_LEN 3u
 
+#define SHARED_PROTO_ADV_SERIALIZED_LEN 12u
+#define SHARED_PROTO_INVENTORY_RSP_SERIALIZED_LEN 9u
+#define SHARED_PROTO_BIND_RSP_SERIALIZED_LEN 3u
+
 #pragma pack(push, 1)
 typedef struct {
     uint32_t magic;
@@ -80,6 +84,15 @@ typedef struct {
 
 bool shared_proto_adv_field_is_valid(const shared_proto_adv_field_t *field);
 bool shared_proto_parse_unicast_cmd(const uint8_t *data, uint16_t len, shared_proto_unicast_cmd_t *cmd);
+
+uint16_t shared_proto_serialize_adv_field(const shared_proto_adv_field_t *field,
+                                          uint8_t *buf, uint16_t buf_len);
+uint16_t shared_proto_serialize_inventory_rsp(const shared_proto_inventory_rsp_t *rsp,
+                                              uint8_t *buf, uint16_t buf_len);
+uint16_t shared_proto_serialize_bind_rsp(const shared_proto_bind_rsp_t *rsp,
+                                         uint8_t *buf, uint16_t buf_len);
+bool shared_proto_deserialize_adv_field(const uint8_t *buf, uint16_t len,
+                                        shared_proto_adv_field_t *field);
 
 #ifdef __cplusplus
 }

@@ -1,7 +1,7 @@
 # BS2x Server端工程进度
 
-> 更新日期：2026-05-05
-> 当前阶段：第二轮迭代完成，断点日志全覆盖，编译通过
+> 更新日期：2026-05-08
+> 当前阶段：第三轮迭代完成，端序修复+PWM蜂鸣器+PM兼容，编译通过
 
 ## 已完成任务
 
@@ -115,3 +115,18 @@
 2. 多连接压力测试
 3. 与WS63端联调验证
 4. 低功耗实际功耗测量与超时调优
+
+---
+
+### P3 第三轮迭代（端序修复 + PWM蜂鸣器 + PM兼容）
+| 编号 | 任务 | 状态 | 说明 |
+|------|------|------|------|
+| T18 | 端序修复-序列化函数 | ✅ | shared_protocol.c实现proto_write_u16_be/u32_be及3个serialize函数 |
+| T19 | 端序修复-广播编码 | ✅ | sle_slave_mgr.c改用shared_proto_serialize_adv_field()替代memcpy |
+| T20 | 端序修复-Notify回复 | ✅ | main.c inventory/bind rsp改用序列化函数 |
+| T21 | SSAP连接日志增强 | ✅ | 连接回调增加对端MAC/配对状态/handle信息；Write回调增加server_id/handle |
+| T22 | PWM蜂鸣器-Kconfig | ✅ | 新增PWM_PIN(20)/PWM_PIN_MODE(40)/PWM_CHANNEL(0)/PWM_GROUP_ID(0) |
+| T23 | PWM蜂鸣器-驱动重写 | ✅ | hardware_hal.c从GPIO改为PWM驱动，V151/V150兼容 |
+| T24 | PM低功耗兼容 | ✅ | work_to_standby和standby_to_sleep回调增加beep_off/led_off |
+| T25 | 编译验证(第三轮) | ✅ | 零错误零警告，Build success |
+| T26 | 修改汇报文档 | ✅ | fix_report_v3.md |

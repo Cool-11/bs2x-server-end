@@ -191,7 +191,7 @@ static errcode_t sle_slave_encode_manufacturer_adv(const shared_proto_adv_field_
         return ERRCODE_SLE_PARAM_ERR;
     }
 
-    uint16_t total_len = SLE_ADV_MANUFACTURER_HEADER_LEN + (uint16_t)sizeof(*field);
+    uint16_t total_len = SLE_ADV_MANUFACTURER_HEADER_LEN + SHARED_PROTO_ADV_SERIALIZED_LEN;
     if (total_len > sizeof(g_adv_payload)) {
         return ERRCODE_SLE_PARAM_ERR;
     }
@@ -201,9 +201,12 @@ static errcode_t sle_slave_encode_manufacturer_adv(const shared_proto_adv_field_
     g_adv_payload[2] = SLE_ADV_MANUFACTURER_ID_L;
     g_adv_payload[3] = SLE_ADV_MANUFACTURER_ID_H;
 
-    if (memcpy_s(&g_adv_payload[SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET],
-                 sizeof(g_adv_payload) - SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET,
-                 field, sizeof(*field)) != EOK) {
+    uint16_t serialized = shared_proto_serialize_adv_field(
+        field, &g_adv_payload[SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET],
+        sizeof(g_adv_payload) - SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET);
+    if (serialized != SHARED_PROTO_ADV_SERIALIZED_LEN) {
+        osal_printk("%s serialize adv FAIL got:%u expect:%u\r\n",
+                    SLE_SLAVE_LOG, serialized, SHARED_PROTO_ADV_SERIALIZED_LEN);
         return ERRCODE_SLE_FAIL;
     }
 
@@ -257,17 +260,26 @@ static void sle_slave_connect_state_changed_cbk(uint16_t conn_id, const sle_addr
                                                 sle_acb_state_t conn_state, sle_pair_state_t pair_state,
                                                 sle_disc_reason_t disc_reason)
 {
-    unused(addr);
-    unused(pair_state);
-    osal_printk("%s conn_id:0x%x state:0x%x disc:0x%x\r\n", SLE_SLAVE_LOG, conn_id, conn_state, disc_reason);
+    if (addr != NULL) {
+        osal_printk("%s[BP] conn_cb id:0x%x state:0x%x pair:0x%x disc:0x%x addr:%02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                    SLE_SLAVE_LOG, conn_id, conn_state, pair_state, disc_reason,
+                    addr->addr[0], addr->addr[1], addr->addr[2],
+                    addr->addr[3], addr->addr[4], addr->addr[5]);
+    } else {
+        osal_printk("%s[BP] conn_cb id:0x%x state:0x%x pair:0x%x disc:0x%x addr=NULL\r\n",
+                    SLE_SLAVE_LOG, conn_id, conn_state, pair_state, disc_reason);
+    }
 
     if (conn_state == SLE_ACB_STATE_CONNECTED) {
         sle_slave_add_connection(conn_id);
+        osal_printk("%s[BP] CONNECTED server_id:%u svc_hdl:0x%x prop_hdl:0x%x\r\n",
+                    SLE_SLAVE_LOG, g_server_id, g_service_handle, g_property_handle);
         if (g_cb.on_conn_state_changed != NULL) {
             g_cb.on_conn_state_changed(conn_id, true);
         }
     } else if (conn_state == SLE_ACB_STATE_DISCONNECTED) {
         sle_slave_remove_connection(conn_id);
+        osal_printk("%s[BP] DISCONNECTED disc_reason:0x%x\r\n", SLE_SLAVE_LOG, disc_reason);
         if (g_cb.on_conn_state_changed != NULL) {
             g_cb.on_conn_state_changed(conn_id, false);
         }
@@ -277,15 +289,15 @@ static void sle_slave_connect_state_changed_cbk(uint16_t conn_id, const sle_addr
 static void ssaps_server_write_request_cbk(uint8_t server_id, uint16_t conn_id, ssaps_req_write_cb_t *write_cb_para,
                                            errcode_t status)
 {
-    unused(server_id);
     unused(status);
 
     if (write_cb_para == NULL || write_cb_para->value == NULL || write_cb_para->length == 0) {
-        osal_printk("%s write cb invalid param\r\n", SLE_SLAVE_LOG);
+        osal_printk("%s[BP] write_cb invalid param\r\n", SLE_SLAVE_LOG);
         return;
     }
 
-    osal_printk("%s Received SSAP Write conn_id:0x%x len:%u data:", SLE_SLAVE_LOG, conn_id, write_cb_para->length);
+    osal_printk("%s[BP] SSAP Write srv:%u conn:0x%x hdl:0x%x len:%u data:",
+                SLE_SLAVE_LOG, server_id, conn_id, write_cb_para->handle, write_cb_para->length);
     for (uint16_t i = 0; i < write_cb_para->length && i < 16; i++) {
         osal_printk(" %02X", write_cb_para->value[i]);
     }
