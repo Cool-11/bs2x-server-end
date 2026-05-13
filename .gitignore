@@ -1,0 +1,42 @@
+# 编译产物
+/output/
+/build/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+
+# Python 虚拟环境
+.venv/
+.venv-1/
+__pycache__/
+
+# IDE 配置
+.vscode/
+.idea/
+.trae/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+*.tmp
+*.bak
+*.log
+
+# LLVM 安装脚本（不需要版本控制）
+llvm.sh
+
+# SDK 源码（单独管理，不提交到项目仓库）
+drivers/
+include/
+kernel/
+middleware/
+open_source/
+protocol/
+tools/
+vendor/
+interim_binary/
+CMakeLists.txt
+config.in
