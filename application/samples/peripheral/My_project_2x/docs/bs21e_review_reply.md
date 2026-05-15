@@ -266,6 +266,7 @@ BS21E端不需要关心ESP32的存在，只需要响应WS63的SSAP命令。
 | 0x02 | 盘点请求 | `[0x02]` | 63→21e | Notify `[0x82, tag_id, qty, status, battery, seq]` |
 | 0x10 | 更新数量 | `[0x10, qty_hi, qty_lo]` | 63→21e | 无（广播qty实时更新） |
 | 0x20 | 写入tag_id | `[0x20, tag_id_hi, tag_id_lo]` | 63→21e | Notify `[0xA0, tag_id_hi, tag_id_lo]` |
+| 0x21 | 解绑标签 | `[0x21]` | 63→21e | Notify `[0xA1, old_tag_id(2B)]` 成功 / `[0xAF, old_tag_id(2B)]` 失败 |
 
 ---
 

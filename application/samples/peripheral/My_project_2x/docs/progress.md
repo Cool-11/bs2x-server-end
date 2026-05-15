@@ -101,6 +101,7 @@
 | 0x02 | 盘点请求 | 63→21e | Notify [0x82, tag_id(2B), qty(2B), status, battery, seq(2B)] 共9字节 |
 | 0x10 | 更新数量 | 63→21e | 无（广播qty实时更新） |
 | 0x20 | 写入tag_id | 63→21e | Notify [0xA0, tag_id(2B)] 成功 / [0xAF, tag_id(2B)] 失败 |
+| 0x21 | 解绑标签 | 63→21e | Notify [0xA1, old_tag_id(2B)] 成功 / [0xAF, old_tag_id(2B)] 失败 |
 
 ### status字段含义
 | 值 | 含义 | 触发条件 |
@@ -130,3 +131,14 @@
 | T24 | PM低功耗兼容 | ✅ | work_to_standby和standby_to_sleep回调增加beep_off/led_off |
 | T25 | 编译验证(第三轮) | ✅ | 零错误零警告，Build success |
 | T26 | 修改汇报文档 | ✅ | fix_report_v3.md |
+
+### P4 第四轮迭代（解绑命令 + Git工程化）
+| 编号 | 任务 | 状态 | 说明 |
+|------|------|------|------|
+| T27 | UNBIND_TAG(0x21)协议定义 | ✅ | shared_protocol.h新增CMD_UNBIND_TAG(0x21)、RSP_UNBIND_OK(0xA1)、ACTION_UNBIND_TAG |
+| T28 | UNBIND_TAG解析 | ✅ | shared_protocol.c新增0x21命令解析（1字节，无参数） |
+| T29 | storage_sync解绑接口 | ✅ | 新增storage_sync_clear_tag_id()：清tag_id=0、qty=0、NV清零 |
+| T30 | SLE命令处理 | ✅ | main.c on_unicast_cmd新增UNBIND_TAG处理，回复0xA1/0xAF |
+| T31 | UART自测支持 | ✅ | uart_selftest_exec新增0x21处理，帮助信息新增命令说明 |
+| T32 | CLAUDE.md更新 | ✅ | 命令表新增0x21解绑命令 |
+| T33 | Git工程化配置 | ✅ | .gitignore、dev分支、双远程(Gitee+GitHub)、skills配置 |

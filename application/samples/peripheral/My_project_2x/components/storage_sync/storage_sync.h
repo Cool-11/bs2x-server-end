@@ -27,6 +27,7 @@ errcode_t storage_sync_init(uint16_t tag_id,
 errcode_t storage_sync_set_qty(uint16_t qty);
 errcode_t storage_sync_set_find_status(bool active);
 errcode_t storage_sync_set_tag_id(uint16_t tag_id);
+errcode_t storage_sync_clear_tag_id(void);
 errcode_t storage_sync_publish(void);
 
 uint16_t storage_sync_get_qty(void);

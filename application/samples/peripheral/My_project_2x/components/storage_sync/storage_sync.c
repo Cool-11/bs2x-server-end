@@ -138,6 +138,30 @@ errcode_t storage_sync_set_tag_id(uint16_t tag_id)
     return ERRCODE_SUCC;
 }
 
+errcode_t storage_sync_clear_tag_id(void)
+{
+    if (!g_sync.inited) {
+        osal_printk("%s[BP] clear_tag_id FAIL not inited\r\n", STORAGE_SYNC_LOG);
+        return ERRCODE_FAIL;
+    }
+
+    uint16_t old_tag_id = g_sync.field.tag_id;
+
+    errcode_t ret = storage_sync_save_tag_id_nv(0);
+    if (ret != ERRCODE_SUCC) {
+        osal_printk("%s[BP] clear_tag_id NV FAIL ret:0x%x\r\n", STORAGE_SYNC_LOG, ret);
+        return ret;
+    }
+
+    g_sync.field.tag_id = 0;
+    g_sync.field.qty = 0;
+    g_sync.field.status = STORAGE_SYNC_STATUS_NORMAL;
+    g_sync.field.seq++;
+    osal_printk("%s[BP] clear_tag_id OK old=%u new=0 qty=0 seq=%u\r\n",
+                STORAGE_SYNC_LOG, old_tag_id, g_sync.field.seq);
+    return ERRCODE_SUCC;
+}
+
 errcode_t storage_sync_publish(void)
 {
     if (!g_sync.inited) {

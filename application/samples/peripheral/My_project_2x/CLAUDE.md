@@ -91,6 +91,7 @@ typedef struct {
 | 0x02 | 盘点 | `[0x02]` | Notify `[0x82, tag_id(2B), qty(2B), status, battery, seq(2B)]` 共9字节 |
 | 0x10 | 更新数量 | `[0x10, qty_hi, qty_lo]` | 无（广播qty实时同步，延迟<100ms） |
 | 0x20 | 绑定tag_id | `[0x20, tag_id_hi, tag_id_lo]` | Notify `[0xA0, tag_id(2B)]` 成功 / `[0xAF, tag_id(2B)]` 失败 |
+| 0x21 | 解绑标签 | `[0x21]` | Notify `[0xA1, old_tag_id(2B)]` 成功 / `[0xAF, old_tag_id(2B)]` 失败 |
 
 ### 3.3 status字段含义
 
@@ -571,3 +572,4 @@ Work ──(5s无活动)──> Standby ──(30s无活动)──> Sleep
 | 修复报告 | `docs/fix_report_v3.md` | 端序修复、PWM蜂鸣器、PM兼容 |
 | 审核回复 | `docs/bs21e_review_reply.md` | 对WS63端审核反馈的逐项回复 |
 | SDK开发指南 | `SLE_2X_SDK_业务逻辑与二次开发指南.md` | SDK API参考 |
+| 调试指南 | `docs/debug/debug_guide.md` | 串口调试、UART命令、常见问题排查 |

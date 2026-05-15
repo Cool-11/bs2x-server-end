@@ -90,6 +90,12 @@ static void my_project_2x_uart_selftest_exec(const uint8_t *data, uint16_t len)
             (void)storage_sync_publish();
             osal_printk("%s[UART_TEST] << BIND_TAG done\r\n", MY_PROJECT_2X_LOG);
             break;
+        case SHARED_PROTO_ACTION_UNBIND_TAG:
+            osal_printk("%s[UART_TEST] >> UNBIND_TAG old_tag_id:%u\r\n", MY_PROJECT_2X_LOG, storage_sync_get_tag_id());
+            (void)storage_sync_clear_tag_id();
+            (void)storage_sync_publish();
+            osal_printk("%s[UART_TEST] << UNBIND_TAG done\r\n", MY_PROJECT_2X_LOG);
+            break;
         default:
             osal_printk("%s[UART_TEST] unknown action:%u\r\n", MY_PROJECT_2X_LOG, cmd.action);
             break;
@@ -160,6 +166,7 @@ static errcode_t my_project_2x_uart_selftest_init(void)
     osal_printk("%s[UART_TEST]   02       = 盘点(INVENTORY)\r\n", MY_PROJECT_2X_LOG);
     osal_printk("%s[UART_TEST]   10 XX XX = 更新数量(UPDATE_QTY)\r\n", MY_PROJECT_2X_LOG);
     osal_printk("%s[UART_TEST]   20 XX XX = 绑定标签(BIND_TAG)\r\n", MY_PROJECT_2X_LOG);
+    osal_printk("%s[UART_TEST]   21       = 解绑标签(UNBIND_TAG)\r\n", MY_PROJECT_2X_LOG);
     return ERRCODE_SUCC;
 }
 
@@ -264,6 +271,31 @@ static void my_project_2x_send_bind_rsp(uint16_t conn_id, uint16_t tag_id, bool 
     }
 }
 
+static void my_project_2x_send_unbind_rsp(uint16_t conn_id, uint16_t old_tag_id, bool success)
+{
+    shared_proto_bind_rsp_t rsp = {
+        .cmd = success ? SHARED_PROTO_RSP_UNBIND_OK : SHARED_PROTO_RSP_BIND_FAIL,
+        .tag_id = old_tag_id,
+    };
+
+    osal_printk("%s[BP] send_unbind_rsp conn_id:0x%x cmd:0x%02x old_tag_id:%u\r\n",
+                MY_PROJECT_2X_LOG, conn_id, rsp.cmd, rsp.tag_id);
+
+    uint8_t buf[SHARED_PROTO_BIND_RSP_SERIALIZED_LEN] = {0};
+    uint16_t len = shared_proto_serialize_bind_rsp(&rsp, buf, sizeof(buf));
+    if (len == 0) {
+        osal_printk("%s[BP] unbind serialize FAIL\r\n", MY_PROJECT_2X_LOG);
+        return;
+    }
+
+    errcode_t ret = sle_slave_notify_conn(conn_id, buf, len);
+    if (ret != ERRCODE_SUCC) {
+        osal_printk("%s[BP] unbind notify FAIL ret:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
+    } else {
+        osal_printk("%s[BP] unbind notify OK\r\n", MY_PROJECT_2X_LOG);
+    }
+}
+
 static void my_project_2x_on_unicast_cmd(uint16_t conn_id, const shared_proto_unicast_cmd_t *cmd)
 {
     if (cmd == NULL) {
@@ -315,6 +347,19 @@ static void my_project_2x_on_unicast_cmd(uint16_t conn_id, const shared_proto_un
                 my_project_2x_send_bind_rsp(conn_id, cmd->tag_id, false);
             }
             osal_printk("%s[BP] << BIND_TAG done ret:0x%x\r\n", MY_PROJECT_2X_LOG, bind_ret);
+            break;
+        }
+        case SHARED_PROTO_ACTION_UNBIND_TAG: {
+            uint16_t old_tag_id = storage_sync_get_tag_id();
+            osal_printk("%s[BP] >> UNBIND_TAG old_tag_id:%u\r\n", MY_PROJECT_2X_LOG, old_tag_id);
+            errcode_t unbind_ret = storage_sync_clear_tag_id();
+            if (unbind_ret == ERRCODE_SUCC) {
+                (void)storage_sync_publish();
+                my_project_2x_send_unbind_rsp(conn_id, old_tag_id, true);
+            } else {
+                my_project_2x_send_unbind_rsp(conn_id, old_tag_id, false);
+            }
+            osal_printk("%s[BP] << UNBIND_TAG done ret:0x%x\r\n", MY_PROJECT_2X_LOG, unbind_ret);
             break;
         }
         default:

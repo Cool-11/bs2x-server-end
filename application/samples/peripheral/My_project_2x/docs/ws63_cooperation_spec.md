@@ -140,6 +140,7 @@ typedef struct {
 | 0x02 | 盘点请求 | `[0x02]` | 63→21e | Notify `[0x82, tag_id, qty, status, battery, seq]`（9字节） |
 | 0x10 | 更新数量 | `[0x10, qty_hi, qty_lo]` | 63→21e | 无（广播qty实时更新） |
 | 0x20 | 写入tag_id | `[0x20, tag_id_hi, tag_id_lo]` | 63→21e | Notify `[0xA0, tag_id_hi, tag_id_lo]` |
+| 0x21 | 解绑标签 | `[0x21]` | 63→21e | Notify `[0xA1, old_tag_id_hi, old_tag_id_lo]` 成功 / `[0xAF, old_tag_id_hi, old_tag_id_lo]` 失败 |
 
 ### 4.2 回复协议结构体
 
@@ -167,6 +168,14 @@ typedef struct {
     uint16_t tag_id;     // 写入的标签ID
 } shared_proto_bind_rsp_t;  // 共3字节
 #pragma pack(pop)
+```
+
+**0x21 解绑确认回复（0xA1）：**
+
+```c
+// 复用 shared_proto_bind_rsp_t 结构体（3字节）
+// cmd = 0xA1（0x21的回复，0x21|0x80=0xA1）
+// tag_id = 解绑前的旧tag_id
 ```
 
 ### 4.3 SSAP 完整交互流程（⚠️ 关键：必须启用 Notify 订阅）
@@ -213,6 +222,13 @@ typedef struct {
   21e端 → 校验当前tag_id是否为0（防覆盖保护）
   21e端 → 写入NV持久化（key=0x3001），更新广播payload，递增seq
   21e端 → SSAP Notify [0xA0, tag_id_hi, tag_id_lo] → 63端（确认写入成功）
+
+发送0x21解绑标签:
+  63端 → SSAP Write [0x21] → 21e端
+  21e端 → 清除tag_id=0、qty=0、status=NORMAL
+  21e端 → NV清零（key=0x3001写入0），更新广播payload，递增seq
+  21e端 → SSAP Notify [0xA1, old_tag_id_hi, old_tag_id_lo] → 63端（确认解绑成功）
+  21e端 → 标签回到"未配网"状态，可被重新bind
 ```
 
 ### 4.5 0x20 写入 tag_id 的覆盖保护
@@ -234,6 +250,7 @@ if (当前tag_id == 0) {
 | 命令码 | 含义 | 数据格式 | 方向 |
 |--------|------|---------|------|
 | 0xAF | 0x20写入失败（tag_id已被占用） | `[0xAF, current_tag_id_hi, current_tag_id_lo]` | 21e→63 |
+| 0xAF | 0x21解绑失败 | `[0xAF, old_tag_id_hi, old_tag_id_lo]` | 21e→63 |
 
 ## 五、SSAP服务UUID
 
@@ -291,6 +308,7 @@ Property权限：READ | WRITE | NOTIFY
 | 命令码 | 含义 | 数据格式 | 方向 | 回复 |
 |--------|------|---------|------|------|
 | 0x20 | 写入tag_id | `[0x20, tag_id_hi, tag_id_lo]` | 63→21e | Notify `[0xA0, tag_id_hi, tag_id_lo]` |
+| 0x21 | 解绑标签 | `[0x21]` | 63→21e | Notify `[0xA1, old_tag_id_hi, old_tag_id_lo]` |
 
 BS21E收到0x20后：
 1. 校验当前tag_id是否为0（防覆盖保护，见4.5节）
@@ -654,11 +672,13 @@ BS21E端不需要关心ESP32的存在，只需要响应WS63的SSAP命令。
 #define CMD_INVENTORY  0x02    // 盘点请求，回复Notify 0x82
 #define CMD_UPDATE_QTY 0x10    // 更新数量，格式：[0x10, qty_hi, qty_lo]
 #define CMD_BIND_TAG   0x20    // 写入tag_id，格式：[0x20, tag_id_hi, tag_id_lo]
+#define CMD_UNBIND_TAG 0x21    // 解绑标签，格式：[0x21]
 
 // SSAP回复码（bit7=1表示回复）
 #define RSP_INVENTORY  0x82    // 盘点回复（0x02|0x80），9字节
 #define RSP_BIND_OK    0xA0    // 配网确认（0x20|0x80），3字节
-#define RSP_BIND_FAIL  0xAF    // 配网拒绝（tag_id已被占用）
+#define RSP_UNBIND_OK  0xA1    // 解绑确认（0x21|0x80），3字节
+#define RSP_BIND_FAIL  0xAF    // 配网/解绑失败
 
 // 连接参数（⚠️ 单位待确认：125μs 或 0.25ms）
 #define CONN_INTERVAL  0x64    // 连接间隔，当前假设125μs单位=12.5ms

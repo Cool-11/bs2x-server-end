@@ -145,6 +145,16 @@ bool shared_proto_parse_unicast_cmd(const uint8_t *data, uint16_t len, shared_pr
         return false;
     }
 
+    /* 去除尾部 CR(0x0D) LF(0x0A)，兼容串口工具自动追加换行 */
+    while (len > 0 && (data[len - 1] == 0x0D || data[len - 1] == 0x0A)) {
+        len--;
+    }
+
+    if (len == 0) {
+        osal_printk("%s[BP] parse FAIL len=0 after strip CR/LF\r\n", SHARED_PROTO_LOG);
+        return false;
+    }
+
     osal_printk("%s[BP] parse enter cmd:0x%02X len:%u raw:", SHARED_PROTO_LOG, data[0], len);
     for (uint16_t i = 0; i < len && i < 8; i++) {
         osal_printk(" %02X", data[i]);
@@ -184,6 +194,12 @@ bool shared_proto_parse_unicast_cmd(const uint8_t *data, uint16_t len, shared_pr
         cmd->action = SHARED_PROTO_ACTION_BIND_TAG;
         cmd->tag_id = ((uint16_t)data[1] << 8) | (uint16_t)data[2];
         osal_printk("%s[BP] parse OK action=BIND_TAG(0x20) tag_id=%u\r\n", SHARED_PROTO_LOG, cmd->tag_id);
+        return true;
+    }
+
+    if (data[0] == SHARED_PROTO_CMD_UNBIND_TAG && len == 1) {
+        cmd->action = SHARED_PROTO_ACTION_UNBIND_TAG;
+        osal_printk("%s[BP] parse OK action=UNBIND_TAG(0x21)\r\n", SHARED_PROTO_LOG);
         return true;
     }
 
