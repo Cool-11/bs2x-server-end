@@ -18,7 +18,7 @@
 #define MY_PROJECT_2X_FIND_STATUS_RESTORE_MS 15000u
 #define MY_PROJECT_2X_WORK_TO_STANDBY_MS 5000u
 #define MY_PROJECT_2X_STANDBY_TO_SLEEP_MS 30000u
-#define MY_PROJECT_2X_DEFAULT_TAG_ID 1u
+#define MY_PROJECT_2X_DEFAULT_TAG_ID 0u
 #define MY_PROJECT_2X_DEFAULT_QTY 0u
 #define MY_PROJECT_2X_DEFAULT_BATTERY 100u
 
@@ -96,15 +96,22 @@ static void my_project_2x_exec_cmd(const shared_proto_unicast_cmd_t *cmd,
             (void)storage_sync_publish();
             osal_printk("%s[%s] << UPDATE_QTY done\r\n", MY_PROJECT_2X_LOG, source);
             break;
-        case SHARED_PROTO_ACTION_BIND_TAG:
+        case SHARED_PROTO_ACTION_BIND_TAG: {
             osal_printk("%s[%s] >> BIND_TAG tag_id:%u\r\n", MY_PROJECT_2X_LOG, source, cmd->tag_id);
-            (void)storage_sync_set_tag_id(cmd->tag_id);
-            (void)storage_sync_publish();
-            if (conn_id != 0) {
-                my_project_2x_send_bind_rsp(conn_id, cmd->tag_id, true);
+            errcode_t bind_ret = storage_sync_set_tag_id(cmd->tag_id);
+            if (bind_ret == ERRCODE_SUCC) {
+                (void)storage_sync_publish();
+                if (conn_id != 0) {
+                    my_project_2x_send_bind_rsp(conn_id, cmd->tag_id, true);
+                }
+            } else {
+                if (conn_id != 0) {
+                    my_project_2x_send_bind_rsp(conn_id, cmd->tag_id, false);
+                }
             }
-            osal_printk("%s[%s] << BIND_TAG done\r\n", MY_PROJECT_2X_LOG, source);
+            osal_printk("%s[%s] << BIND_TAG done ret:0x%x\r\n", MY_PROJECT_2X_LOG, source, bind_ret);
             break;
+        }
         case SHARED_PROTO_ACTION_UNBIND_TAG: {
             uint16_t old_tag_id = storage_sync_get_tag_id();
             osal_printk("%s[%s] >> UNBIND_TAG old_tag_id:%u\r\n", MY_PROJECT_2X_LOG, source, old_tag_id);

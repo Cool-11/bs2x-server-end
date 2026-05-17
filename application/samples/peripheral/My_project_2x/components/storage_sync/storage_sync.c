@@ -52,12 +52,12 @@ errcode_t storage_sync_init(uint16_t tag_id,
     g_sync.adapter = *adapter;
 
     uint16_t nv_tag_id = 0;
-    if (storage_sync_load_tag_id_nv(&nv_tag_id) == ERRCODE_SUCC && nv_tag_id != 0) {
+    if (storage_sync_load_tag_id_nv(&nv_tag_id) == ERRCODE_SUCC) {
         g_sync.field.tag_id = nv_tag_id;
         osal_printk("%s[BP] restored tag_id=%u from NV\r\n", STORAGE_SYNC_LOG, nv_tag_id);
     } else {
         g_sync.field.tag_id = tag_id;
-        osal_printk("%s[BP] use default tag_id=%u (NV empty or 0)\r\n", STORAGE_SYNC_LOG, tag_id);
+        osal_printk("%s[BP] use default tag_id=%u (NV empty)\r\n", STORAGE_SYNC_LOG, tag_id);
     }
 
     g_sync.field.magic = SHARED_PROTO_MAGIC;
@@ -130,6 +130,13 @@ errcode_t storage_sync_set_tag_id(uint16_t tag_id)
         return ERRCODE_SUCC;
     }
 
+    /* 已绑定其他 tag_id，必须先解绑才能重新绑定 */
+    if (g_sync.field.tag_id != 0) {
+        osal_printk("%s[BP] set_tag_id FAIL already bound to %u, unbind first\r\n",
+                    STORAGE_SYNC_LOG, g_sync.field.tag_id);
+        return ERRCODE_FAIL;
+    }
+
     errcode_t ret = storage_sync_save_tag_id_nv(tag_id);
     if (ret != ERRCODE_SUCC) {
         return ret;
@@ -148,12 +155,20 @@ errcode_t storage_sync_clear_tag_id(void)
         return ERRCODE_FAIL;
     }
 
-    /* 出库时保留 tag_id，只清零 qty 和恢复 NORMAL 状态 */
+    uint16_t old_tag_id = g_sync.field.tag_id;
+
+    errcode_t ret = storage_sync_save_tag_id_nv(0);
+    if (ret != ERRCODE_SUCC) {
+        osal_printk("%s[BP] clear_tag_id NV FAIL ret:0x%x\r\n", STORAGE_SYNC_LOG, ret);
+        return ret;
+    }
+
+    g_sync.field.tag_id = 0;
     g_sync.field.qty = 0;
     g_sync.field.status = SHARED_PROTO_STATUS_NORMAL;
     g_sync.field.seq++;
-    osal_printk("%s[BP] clear_tag_id OK tag_id=%u preserved qty=0 seq=%u\r\n",
-                STORAGE_SYNC_LOG, g_sync.field.tag_id, g_sync.field.seq);
+    osal_printk("%s[BP] clear_tag_id OK old=%u new=0 qty=0 seq=%u\r\n",
+                STORAGE_SYNC_LOG, old_tag_id, g_sync.field.seq);
     return ERRCODE_SUCC;
 }
 
