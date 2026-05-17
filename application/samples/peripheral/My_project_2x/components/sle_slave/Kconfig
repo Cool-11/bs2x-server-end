@@ -4,3 +4,12 @@ config MY_PROJECT_2X_SLE_SLAVE_ENABLE
     bool "Enable sle_slave component"
     default y
     depends on SAMPLE_SUPPORT_MY_PROJECT_2X
+
+config MY_PROJECT_2X_MAX_CONNECTIONS
+    int "Maximum SLE connections"
+    default 4
+    range 1 8
+    depends on MY_PROJECT_2X_SLE_SLAVE_ENABLE
+    help
+        Maximum number of simultaneous SLE connections.
+        Each connection consumes memory for conn_id tracking.

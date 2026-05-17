@@ -18,6 +18,10 @@ extern "C" {
 #define SHARED_PROTO_CMD_BIND_TAG 0x20u
 #define SHARED_PROTO_CMD_UNBIND_TAG 0x21u
 
+#define SHARED_PROTO_STATUS_NORMAL   0x00u
+#define SHARED_PROTO_STATUS_FINDING  0x01u
+#define SHARED_PROTO_STATUS_OUTSTOCK 0x02u
+
 #define SHARED_PROTO_RSP_INVENTORY 0x82u
 #define SHARED_PROTO_RSP_BIND_OK 0xA0u
 #define SHARED_PROTO_RSP_UNBIND_OK 0xA1u
@@ -68,6 +72,9 @@ typedef struct {
 
 _Static_assert(sizeof(shared_proto_bind_rsp_t) == SHARED_PROTO_BIND_OK_RSP_LEN,
                "shared_proto_bind_rsp_t must be 3 bytes");
+
+/* 解绑响应复用 bind_rsp 结构体（cmd + tag_id），此处加语义别名 */
+typedef shared_proto_bind_rsp_t shared_proto_unbind_rsp_t;
 
 typedef enum {
     SHARED_PROTO_ACTION_NONE = 0,

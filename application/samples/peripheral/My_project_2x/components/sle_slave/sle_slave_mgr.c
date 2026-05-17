@@ -14,6 +14,7 @@
 #include "sle_ssap_server.h"
 #include "nv.h"
 #include "tcxo.h"
+#include "efuse.h"
 
 #ifndef CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE
 #define CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE 1
@@ -371,9 +372,17 @@ static errcode_t sle_slave_ensure_unique_mac(sle_addr_t *addr)
         }
     }
 
+    /* 种子 = 时间戳 XOR 芯片唯一ID，增加随机性 */
     uint32_t seed = (uint32_t)(uapi_tcxo_get_ms() & 0xFFFFFFFF);
     if (seed == 0) {
         seed = 0xDEADBEEF;
+    }
+    /* 混入 chip_id（如果可用） */
+    uint8_t chip_id[8] = {0};
+    if (uapi_efuse_get_chip_id(chip_id, sizeof(chip_id)) == ERRCODE_SUCC) {
+        for (uint8_t i = 0; i < sizeof(chip_id); i++) {
+            seed ^= (uint32_t)chip_id[i] << ((i % 4) * 8);
+        }
     }
     for (uint8_t i = 0; i < SLE_ADDR_LEN; i++) {
         seed = seed * 1103515245 + 12345;

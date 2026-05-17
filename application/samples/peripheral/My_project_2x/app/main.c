@@ -34,6 +34,93 @@ static volatile uint16_t g_uart_rx_len = 0;
 static uint8_t g_uart_rx_buffer[UART_SELFTEST_RX_BUF_SIZE] = {0};
 
 static errcode_t my_project_2x_start_find_status_restore_timer(void);
+static void my_project_2x_on_conn_state_changed(uint16_t conn_id, bool connected);
+static void my_project_2x_send_inventory_rsp(uint16_t conn_id);
+static void my_project_2x_send_bind_rsp(uint16_t conn_id, uint16_t tag_id, bool success);
+static void my_project_2x_send_unbind_rsp(uint16_t conn_id, uint16_t old_tag_id, bool success);
+
+/* 公共命令执行函数：UART 自测和 SLE 命令共用 */
+static void my_project_2x_exec_cmd(const shared_proto_unicast_cmd_t *cmd,
+    uint16_t conn_id, const char *source)
+{
+    if (cmd == NULL) {
+        osal_printk("%s[%s] exec_cmd FAIL cmd=NULL\r\n", MY_PROJECT_2X_LOG, source);
+        return;
+    }
+
+    (void)uapi_pm_work_state_reset();
+
+    switch (cmd->action) {
+        case SHARED_PROTO_ACTION_FIND_ME:
+            osal_printk("%s[%s] >> FIND_ME\r\n", MY_PROJECT_2X_LOG, source);
+            /* 如果已在寻物中，记录重复日志 */
+            if (storage_sync_get_qty() == 0) {
+                shared_proto_adv_field_t cur = {0};
+                storage_sync_get_field(&cur);
+                if (cur.status == SHARED_PROTO_STATUS_FINDING) {
+                    osal_printk("%s[%s] FIND_ME repeated, already FINDING\r\n",
+                                MY_PROJECT_2X_LOG, source);
+                }
+            }
+            (void)hardware_hal_beep_on_for_ms(MY_PROJECT_2X_FIND_MS);
+            (void)hardware_hal_led_on_for_ms(MY_PROJECT_2X_FIND_MS);
+            (void)storage_sync_set_find_status(true);
+            (void)storage_sync_publish();
+            (void)my_project_2x_start_find_status_restore_timer();
+            osal_printk("%s[%s] << FIND_ME done\r\n", MY_PROJECT_2X_LOG, source);
+            break;
+        case SHARED_PROTO_ACTION_STOP_FIND:
+            osal_printk("%s[%s] >> STOP_FIND\r\n", MY_PROJECT_2X_LOG, source);
+            (void)hardware_hal_beep_off();
+            (void)hardware_hal_led_off();
+            (void)storage_sync_set_find_status(false);
+            (void)storage_sync_publish();
+            osal_printk("%s[%s] << STOP_FIND done\r\n", MY_PROJECT_2X_LOG, source);
+            break;
+        case SHARED_PROTO_ACTION_INVENTORY:
+            osal_printk("%s[%s] >> INVENTORY\r\n", MY_PROJECT_2X_LOG, source);
+            if (conn_id != 0) {
+                my_project_2x_send_inventory_rsp(conn_id);
+            } else {
+                shared_proto_adv_field_t field = {0};
+                storage_sync_get_field(&field);
+                osal_printk("%s[%s] tag:%u qty:%u status:0x%02x bat:%u seq:%u\r\n",
+                    MY_PROJECT_2X_LOG, source, field.tag_id, field.qty,
+                    field.status, field.battery, field.seq);
+            }
+            osal_printk("%s[%s] << INVENTORY done\r\n", MY_PROJECT_2X_LOG, source);
+            break;
+        case SHARED_PROTO_ACTION_UPDATE_QTY:
+            osal_printk("%s[%s] >> UPDATE_QTY qty:%u\r\n", MY_PROJECT_2X_LOG, source, cmd->qty);
+            (void)storage_sync_set_qty(cmd->qty);
+            (void)storage_sync_publish();
+            osal_printk("%s[%s] << UPDATE_QTY done\r\n", MY_PROJECT_2X_LOG, source);
+            break;
+        case SHARED_PROTO_ACTION_BIND_TAG:
+            osal_printk("%s[%s] >> BIND_TAG tag_id:%u\r\n", MY_PROJECT_2X_LOG, source, cmd->tag_id);
+            (void)storage_sync_set_tag_id(cmd->tag_id);
+            (void)storage_sync_publish();
+            if (conn_id != 0) {
+                my_project_2x_send_bind_rsp(conn_id, cmd->tag_id, true);
+            }
+            osal_printk("%s[%s] << BIND_TAG done\r\n", MY_PROJECT_2X_LOG, source);
+            break;
+        case SHARED_PROTO_ACTION_UNBIND_TAG: {
+            uint16_t old_tag_id = storage_sync_get_tag_id();
+            osal_printk("%s[%s] >> UNBIND_TAG old_tag_id:%u\r\n", MY_PROJECT_2X_LOG, source, old_tag_id);
+            errcode_t ret = storage_sync_clear_tag_id();
+            (void)storage_sync_publish();
+            if (conn_id != 0) {
+                my_project_2x_send_unbind_rsp(conn_id, old_tag_id, ret == ERRCODE_SUCC);
+            }
+            osal_printk("%s[%s] << UNBIND_TAG done ret:0x%x\r\n", MY_PROJECT_2X_LOG, source, ret);
+            break;
+        }
+        default:
+            osal_printk("%s[%s] unknown action:%u\r\n", MY_PROJECT_2X_LOG, source, cmd->action);
+            break;
+    }
+}
 
 static void my_project_2x_uart_selftest_exec(const uint8_t *data, uint16_t len)
 {
@@ -48,58 +135,7 @@ static void my_project_2x_uart_selftest_exec(const uint8_t *data, uint16_t len)
                     MY_PROJECT_2X_LOG, data[0], len);
         return;
     }
-
-    (void)uapi_pm_work_state_reset();
-
-    switch (cmd.action) {
-        case SHARED_PROTO_ACTION_FIND_ME:
-            osal_printk("%s[UART_TEST] >> FIND_ME\r\n", MY_PROJECT_2X_LOG);
-            (void)hardware_hal_beep_on_for_ms(MY_PROJECT_2X_FIND_MS);
-            (void)hardware_hal_led_on_for_ms(MY_PROJECT_2X_FIND_MS);
-            (void)storage_sync_set_find_status(true);
-            (void)storage_sync_publish();
-            (void)my_project_2x_start_find_status_restore_timer();
-            osal_printk("%s[UART_TEST] << FIND_ME done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_STOP_FIND:
-            osal_printk("%s[UART_TEST] >> STOP_FIND\r\n", MY_PROJECT_2X_LOG);
-            (void)hardware_hal_beep_off();
-            (void)hardware_hal_led_off();
-            (void)storage_sync_set_find_status(false);
-            (void)storage_sync_publish();
-            osal_printk("%s[UART_TEST] << STOP_FIND done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_INVENTORY: {
-            osal_printk("%s[UART_TEST] >> INVENTORY\r\n", MY_PROJECT_2X_LOG);
-            shared_proto_adv_field_t field = {0};
-            storage_sync_get_field(&field);
-            osal_printk("%s[UART_TEST] tag:%u qty:%u status:0x%02x bat:%u seq:%u\r\n",
-                        MY_PROJECT_2X_LOG, field.tag_id, field.qty, field.status, field.battery, field.seq);
-            osal_printk("%s[UART_TEST] << INVENTORY done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        }
-        case SHARED_PROTO_ACTION_UPDATE_QTY:
-            osal_printk("%s[UART_TEST] >> UPDATE_QTY qty:%u\r\n", MY_PROJECT_2X_LOG, cmd.qty);
-            (void)storage_sync_set_qty(cmd.qty);
-            (void)storage_sync_publish();
-            osal_printk("%s[UART_TEST] << UPDATE_QTY done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_BIND_TAG:
-            osal_printk("%s[UART_TEST] >> BIND_TAG tag_id:%u\r\n", MY_PROJECT_2X_LOG, cmd.tag_id);
-            (void)storage_sync_set_tag_id(cmd.tag_id);
-            (void)storage_sync_publish();
-            osal_printk("%s[UART_TEST] << BIND_TAG done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_UNBIND_TAG:
-            osal_printk("%s[UART_TEST] >> UNBIND_TAG old_tag_id:%u\r\n", MY_PROJECT_2X_LOG, storage_sync_get_tag_id());
-            (void)storage_sync_clear_tag_id();
-            (void)storage_sync_publish();
-            osal_printk("%s[UART_TEST] << UNBIND_TAG done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        default:
-            osal_printk("%s[UART_TEST] unknown action:%u\r\n", MY_PROJECT_2X_LOG, cmd.action);
-            break;
-    }
+    my_project_2x_exec_cmd(&cmd, 0, "UART_TEST");
 }
 
 static void my_project_2x_uart_rx_callback(const void *buffer, uint16_t length, bool error)
@@ -273,7 +309,7 @@ static void my_project_2x_send_bind_rsp(uint16_t conn_id, uint16_t tag_id, bool 
 
 static void my_project_2x_send_unbind_rsp(uint16_t conn_id, uint16_t old_tag_id, bool success)
 {
-    shared_proto_bind_rsp_t rsp = {
+    shared_proto_unbind_rsp_t rsp = {
         .cmd = success ? SHARED_PROTO_RSP_UNBIND_OK : SHARED_PROTO_RSP_BIND_FAIL,
         .tag_id = old_tag_id,
     };
@@ -306,66 +342,7 @@ static void my_project_2x_on_unicast_cmd(uint16_t conn_id, const shared_proto_un
     osal_printk("%s[BP] on_unicast_cmd conn_id:0x%x action:%u qty:%u tag_id:%u\r\n",
                 MY_PROJECT_2X_LOG, conn_id, cmd->action, cmd->qty, cmd->tag_id);
 
-    (void)uapi_pm_work_state_reset();
-
-    switch (cmd->action) {
-        case SHARED_PROTO_ACTION_FIND_ME:
-            osal_printk("%s[BP] >> FIND_ME\r\n", MY_PROJECT_2X_LOG);
-            (void)hardware_hal_beep_on_for_ms(MY_PROJECT_2X_FIND_MS);
-            (void)hardware_hal_led_on_for_ms(MY_PROJECT_2X_FIND_MS);
-            (void)storage_sync_set_find_status(true);
-            (void)storage_sync_publish();
-            (void)my_project_2x_start_find_status_restore_timer();
-            osal_printk("%s[BP] << FIND_ME done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_STOP_FIND:
-            osal_printk("%s[BP] >> STOP_FIND\r\n", MY_PROJECT_2X_LOG);
-            (void)hardware_hal_beep_off();
-            (void)hardware_hal_led_off();
-            (void)storage_sync_set_find_status(false);
-            (void)storage_sync_publish();
-            osal_printk("%s[BP] << STOP_FIND done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_INVENTORY:
-            osal_printk("%s[BP] >> INVENTORY\r\n", MY_PROJECT_2X_LOG);
-            my_project_2x_send_inventory_rsp(conn_id);
-            osal_printk("%s[BP] << INVENTORY done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_UPDATE_QTY:
-            osal_printk("%s[BP] >> UPDATE_QTY qty:%u\r\n", MY_PROJECT_2X_LOG, cmd->qty);
-            (void)storage_sync_set_qty(cmd->qty);
-            (void)storage_sync_publish();
-            osal_printk("%s[BP] << UPDATE_QTY done\r\n", MY_PROJECT_2X_LOG);
-            break;
-        case SHARED_PROTO_ACTION_BIND_TAG: {
-            osal_printk("%s[BP] >> BIND_TAG tag_id:%u\r\n", MY_PROJECT_2X_LOG, cmd->tag_id);
-            errcode_t bind_ret = storage_sync_set_tag_id(cmd->tag_id);
-            if (bind_ret == ERRCODE_SUCC) {
-                (void)storage_sync_publish();
-                my_project_2x_send_bind_rsp(conn_id, cmd->tag_id, true);
-            } else {
-                my_project_2x_send_bind_rsp(conn_id, cmd->tag_id, false);
-            }
-            osal_printk("%s[BP] << BIND_TAG done ret:0x%x\r\n", MY_PROJECT_2X_LOG, bind_ret);
-            break;
-        }
-        case SHARED_PROTO_ACTION_UNBIND_TAG: {
-            uint16_t old_tag_id = storage_sync_get_tag_id();
-            osal_printk("%s[BP] >> UNBIND_TAG old_tag_id:%u\r\n", MY_PROJECT_2X_LOG, old_tag_id);
-            errcode_t unbind_ret = storage_sync_clear_tag_id();
-            if (unbind_ret == ERRCODE_SUCC) {
-                (void)storage_sync_publish();
-                my_project_2x_send_unbind_rsp(conn_id, old_tag_id, true);
-            } else {
-                my_project_2x_send_unbind_rsp(conn_id, old_tag_id, false);
-            }
-            osal_printk("%s[BP] << UNBIND_TAG done ret:0x%x\r\n", MY_PROJECT_2X_LOG, unbind_ret);
-            break;
-        }
-        default:
-            osal_printk("%s[BP] unknown cmd action:%u\r\n", MY_PROJECT_2X_LOG, cmd->action);
-            break;
-    }
+    my_project_2x_exec_cmd(cmd, conn_id, "BP");
 }
 
 static int32_t my_project_2x_work_to_standby(uintptr_t arg)
@@ -428,6 +405,23 @@ static void my_project_2x_pm_init(void)
 #endif
 }
 
+static void my_project_2x_on_conn_state_changed(uint16_t conn_id, bool connected)
+{
+    if (connected) {
+        osal_printk("%s[BP] conn_id:0x%x CONNECTED\r\n", MY_PROJECT_2X_LOG, conn_id);
+        return;
+    }
+
+    osal_printk("%s[BP] conn_id:0x%x DISCONNECTED, stop sound/light, restore status\r\n",
+                MY_PROJECT_2X_LOG, conn_id);
+    /* 断开时停止声光 */
+    (void)hardware_hal_beep_off();
+    (void)hardware_hal_led_off();
+    /* 恢复 FINDING → NORMAL */
+    (void)storage_sync_set_find_status(false);
+    (void)storage_sync_publish();
+}
+
 static void my_project_2x_entry(void)
 {
     osal_printk("%s[BP] ===== APP ENTRY START =====\r\n", MY_PROJECT_2X_LOG);
@@ -443,6 +437,7 @@ static void my_project_2x_entry(void)
 
     sle_slave_callbacks_t slave_cb = {
         .on_unicast_cmd = my_project_2x_on_unicast_cmd,
+        .on_conn_state_changed = my_project_2x_on_conn_state_changed,
     };
 
     errcode_t ret = sle_slave_init(&slave_cb);

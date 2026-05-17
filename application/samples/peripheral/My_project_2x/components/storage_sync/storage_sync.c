@@ -5,9 +5,6 @@
 #include "soc_osal.h"
 
 #define STORAGE_SYNC_LOG "[BS2x_SYNC]"
-#define STORAGE_SYNC_STATUS_NORMAL 0x00u
-#define STORAGE_SYNC_STATUS_FINDING 0x01u
-#define STORAGE_SYNC_STATUS_OUTSTOCK 0x02u
 
 typedef struct {
     bool inited;
@@ -65,7 +62,7 @@ errcode_t storage_sync_init(uint16_t tag_id,
 
     g_sync.field.magic = SHARED_PROTO_MAGIC;
     g_sync.field.qty = qty;
-    g_sync.field.status = STORAGE_SYNC_STATUS_NORMAL;
+    g_sync.field.status = SHARED_PROTO_STATUS_NORMAL;
     g_sync.field.battery = battery;
     g_sync.field.seq = 0;
     g_sync.inited = true;
@@ -89,12 +86,12 @@ errcode_t storage_sync_set_qty(uint16_t qty)
     g_sync.field.seq++;
 
     if (qty == 0) {
-        g_sync.field.status = STORAGE_SYNC_STATUS_OUTSTOCK;
+        g_sync.field.status = SHARED_PROTO_STATUS_OUTSTOCK;
         osal_printk("%s[BP] set_qty=0 OUTSTOCK status=0x%02x seq=%u\r\n",
                     STORAGE_SYNC_LOG, g_sync.field.status, g_sync.field.seq);
     } else {
-        if (g_sync.field.status == STORAGE_SYNC_STATUS_OUTSTOCK) {
-            g_sync.field.status = STORAGE_SYNC_STATUS_NORMAL;
+        if (g_sync.field.status == SHARED_PROTO_STATUS_OUTSTOCK) {
+            g_sync.field.status = SHARED_PROTO_STATUS_NORMAL;
         }
         osal_printk("%s[BP] set_qty=%u status=0x%02x seq=%u\r\n",
                     STORAGE_SYNC_LOG, qty, g_sync.field.status, g_sync.field.seq);
@@ -110,9 +107,9 @@ errcode_t storage_sync_set_find_status(bool active)
     }
 
     if (active) {
-        g_sync.field.status = STORAGE_SYNC_STATUS_FINDING;
+        g_sync.field.status = SHARED_PROTO_STATUS_FINDING;
     } else {
-        g_sync.field.status = (g_sync.field.qty == 0) ? STORAGE_SYNC_STATUS_OUTSTOCK : STORAGE_SYNC_STATUS_NORMAL;
+        g_sync.field.status = (g_sync.field.qty == 0) ? SHARED_PROTO_STATUS_OUTSTOCK : SHARED_PROTO_STATUS_NORMAL;
     }
     g_sync.field.seq++;
     osal_printk("%s[BP] find_status=%s restore_to=0x%02x seq=%u\r\n",
@@ -125,6 +122,12 @@ errcode_t storage_sync_set_tag_id(uint16_t tag_id)
     if (!g_sync.inited) {
         osal_printk("%s[BP] set_tag_id FAIL not inited\r\n", STORAGE_SYNC_LOG);
         return ERRCODE_FAIL;
+    }
+
+    /* 重复绑定相同 tag_id，跳过 NV 写入延长寿命 */
+    if (g_sync.field.tag_id == tag_id) {
+        osal_printk("%s[BP] set_tag_id=%u same, skip NV write\r\n", STORAGE_SYNC_LOG, tag_id);
+        return ERRCODE_SUCC;
     }
 
     errcode_t ret = storage_sync_save_tag_id_nv(tag_id);
@@ -145,20 +148,12 @@ errcode_t storage_sync_clear_tag_id(void)
         return ERRCODE_FAIL;
     }
 
-    uint16_t old_tag_id = g_sync.field.tag_id;
-
-    errcode_t ret = storage_sync_save_tag_id_nv(0);
-    if (ret != ERRCODE_SUCC) {
-        osal_printk("%s[BP] clear_tag_id NV FAIL ret:0x%x\r\n", STORAGE_SYNC_LOG, ret);
-        return ret;
-    }
-
-    g_sync.field.tag_id = 0;
+    /* 出库时保留 tag_id，只清零 qty 和恢复 NORMAL 状态 */
     g_sync.field.qty = 0;
-    g_sync.field.status = STORAGE_SYNC_STATUS_NORMAL;
+    g_sync.field.status = SHARED_PROTO_STATUS_NORMAL;
     g_sync.field.seq++;
-    osal_printk("%s[BP] clear_tag_id OK old=%u new=0 qty=0 seq=%u\r\n",
-                STORAGE_SYNC_LOG, old_tag_id, g_sync.field.seq);
+    osal_printk("%s[BP] clear_tag_id OK tag_id=%u preserved qty=0 seq=%u\r\n",
+                STORAGE_SYNC_LOG, g_sync.field.tag_id, g_sync.field.seq);
     return ERRCODE_SUCC;
 }
 
