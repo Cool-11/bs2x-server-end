@@ -33,11 +33,19 @@
 
 #define HW_HAL_LOG "[BS2x_HAL]"
 
-/* 无源蜂鸣器PWM参数：目标2kHz，50%占空比 */
-#define BUZZER_PWM_LOW_TIME  100u
-#define BUZZER_PWM_HIGH_TIME 100u
+/* 无源蜂鸣器PWM参数：目标2kHz，50%占空比
+ * PWM时钟=32MHz，freq = 32MHz / (low_time + high_time)
+ * 2kHz → 32000000 / 2000 = 16000 → low=8000, high=8000
+ */
+#define BUZZER_PWM_LOW_TIME  8000u
+#define BUZZER_PWM_HIGH_TIME 8000u
 #define BUZZER_PWM_OFFSET    0u
 #define BUZZER_PWM_CYCLES    0xFFu
+
+/* 间歇鸣叫参数：响200ms → 停200ms，共15秒 */
+#define BEEP_TOGGLE_PERIOD_MS   200u
+#define BEEP_TOGGLE_TOTAL_MS    15000u
+#define BEEP_TOGGLE_MAX_COUNT   (BEEP_TOGGLE_TOTAL_MS / BEEP_TOGGLE_PERIOD_MS)
 
 typedef struct {
     osal_timer timer;
@@ -45,6 +53,7 @@ typedef struct {
     bool beep_on;
     bool led_on;
     bool pwm_inited;
+    uint16_t toggle_count;
 } hw_hal_ctx_t;
 
 static hw_hal_ctx_t g_hw = {0};
@@ -63,21 +72,48 @@ static void hw_hal_pwm_buzzer_stop(void)
     osal_printk("%s[BP] pwm_buzzer_stop ch:%u\r\n", HW_HAL_LOG, CONFIG_MY_PROJECT_2X_PWM_CHANNEL);
 }
 
+static void hw_hal_pwm_buzzer_start(void)
+{
+    if (!g_hw.pwm_inited) {
+        return;
+    }
+
+#if defined(CONFIG_PWM_USING_V151)
+    (void)uapi_pwm_start_group((uint8_t)CONFIG_MY_PROJECT_2X_PWM_GROUP_ID);
+#else
+    (void)uapi_pwm_start((uint8_t)CONFIG_MY_PROJECT_2X_PWM_CHANNEL);
+#endif
+}
+
 static void hw_hal_force_all_off(void)
 {
     hw_hal_pwm_buzzer_stop();
     (void)uapi_gpio_set_val((pin_t)CONFIG_MY_PROJECT_2X_LED_GPIO, GPIO_LEVEL_LOW);
     g_hw.beep_on = false;
     g_hw.led_on = false;
+    g_hw.toggle_count = 0;
     osal_printk("%s[BP] force_all_off led_gpio=%d\r\n", HW_HAL_LOG, CONFIG_MY_PROJECT_2X_LED_GPIO);
 }
 
 static void hw_hal_auto_off_timer_handler(unsigned long data)
 {
     unused(data);
-    osal_printk("%s[BP] auto_off_timer timeout beep_on=%d led_on=%d\r\n",
-                HW_HAL_LOG, g_hw.beep_on, g_hw.led_on);
-    hw_hal_force_all_off();
+
+    g_hw.toggle_count++;
+    if (g_hw.toggle_count >= BEEP_TOGGLE_MAX_COUNT) {
+        osal_printk("%s[BP] beep pattern done, count=%u\r\n", HW_HAL_LOG, g_hw.toggle_count);
+        hw_hal_force_all_off();
+        return;
+    }
+
+    /* 交替开/关蜂鸣器：偶数次开，奇数次关 */
+    if (g_hw.toggle_count % 2 == 0) {
+        hw_hal_pwm_buzzer_start();
+        g_hw.beep_on = true;
+    } else {
+        hw_hal_pwm_buzzer_stop();
+        g_hw.beep_on = false;
+    }
 }
 
 static hw_hal_status_t hw_hal_pwm_buzzer_init(void)
@@ -158,7 +194,7 @@ hw_hal_status_t hardware_hal_init(void)
 
     g_hw.timer.handler = hw_hal_auto_off_timer_handler;
     g_hw.timer.data = 0;
-    g_hw.timer.interval = CONFIG_MY_PROJECT_2X_BEEP_AUTO_OFF_MS;
+    g_hw.timer.interval = BEEP_TOGGLE_PERIOD_MS;
 
     int ret = osal_timer_init(&g_hw.timer);
     if (ret != OSAL_SUCCESS) {
@@ -206,7 +242,8 @@ static hw_hal_status_t hw_hal_start_auto_off(uint32_t ms)
 
 hw_hal_status_t hardware_hal_beep_on_for_ms(uint32_t ms)
 {
-    osal_printk("%s[BP] beep_on request ms=%u\r\n", HW_HAL_LOG, ms);
+    unused(ms);
+    osal_printk("%s[BP] beep_on request (intermittent pattern)\r\n", HW_HAL_LOG);
 
     if (hardware_hal_init() != HW_HAL_OK) {
         osal_printk("%s[BP] beep_on FAIL hal_init error\r\n", HW_HAL_LOG);
@@ -214,28 +251,28 @@ hw_hal_status_t hardware_hal_beep_on_for_ms(uint32_t ms)
     }
 
     /* 启动PWM方波驱动无源蜂鸣器 */
-    errcode_t ret;
-#if defined(CONFIG_PWM_USING_V151)
-    ret = uapi_pwm_start_group((uint8_t)CONFIG_MY_PROJECT_2X_PWM_GROUP_ID);
-#else
-    ret = uapi_pwm_start((uint8_t)CONFIG_MY_PROJECT_2X_PWM_CHANNEL);
-#endif
-    if (ret != ERRCODE_SUCC) {
-        osal_printk("%s[BP] pwm_start FAIL ret:0x%x\r\n", HW_HAL_LOG, ret);
+    hw_hal_pwm_buzzer_start();
+    g_hw.beep_on = true;
+    g_hw.toggle_count = 0;
+
+    /* 启动200ms周期定时器，交替开/关蜂鸣器 */
+    (void)osal_timer_stop(&g_hw.timer);
+    int ret = osal_timer_mod(&g_hw.timer, BEEP_TOGGLE_PERIOD_MS);
+    if (ret != OSAL_SUCCESS) {
+        hw_hal_force_all_off();
+        osal_printk("%s[BP] beep_on FAIL timer_mod ret=%d\r\n", HW_HAL_LOG, ret);
         return HW_HAL_ERR_OS;
     }
 
-    g_hw.beep_on = true;
-
-    hw_hal_status_t st = hw_hal_start_auto_off(ms);
-    if (st != HW_HAL_OK) {
-        osal_printk("%s[BP] beep_on FAIL auto_off error st=%d\r\n", HW_HAL_LOG, st);
+    ret = osal_timer_start(&g_hw.timer);
+    if (ret != OSAL_SUCCESS) {
         hw_hal_force_all_off();
-        return st;
+        osal_printk("%s[BP] beep_on FAIL timer_start ret=%d\r\n", HW_HAL_LOG, ret);
+        return HW_HAL_ERR_OS;
     }
 
-    osal_printk("%s[BP] beep_on OK pwm_pin:%u ch:%u\r\n",
-                HW_HAL_LOG, CONFIG_MY_PROJECT_2X_PWM_PIN, CONFIG_MY_PROJECT_2X_PWM_CHANNEL);
+    osal_printk("%s[BP] beep_on OK intermittent %ums on/%ums off, total %ums\r\n",
+                HW_HAL_LOG, BEEP_TOGGLE_PERIOD_MS, BEEP_TOGGLE_PERIOD_MS, BEEP_TOGGLE_TOTAL_MS);
     return HW_HAL_OK;
 }
 
