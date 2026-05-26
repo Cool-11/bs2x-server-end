@@ -25,8 +25,33 @@
 
 1. 上电生成唯一MAC，持久化到NV，重启不变
 2. 持续广播 `tag_id + qty + status + battery + seq`（12字节厂商数据）
-3. 接收SSAP单播命令：寻物(0x01)、盘点(0x02)、更新数量(0x10)、绑定tag_id(0x20)
+3. 接收SSAP单播命令：寻物(0x01)、盘点(0x02)、更新数量(0x10)、绑定tag_id(0x20)、解绑(0x21)
 4. 无连接超时进入低功耗 Standby/Sleep
+
+### 1.3 运行架构（LiteOS 事件驱动）
+
+```
+bt_service 任务（SDK内部，SLE协议栈）
+    ↓ SSAP Write 回调
+    ↓ 解析命令 → osEventFlagsSet(g_event_flags, EVENT_XXX)
+    ↓ 立即返回
+
+主任务（main loop）
+    ↓ osEventFlagsWait(g_event_flags, ALL_EVENTS, osFlagsWaitAny, osWaitForever)
+    ↓ 唤醒 → switch 处理业务逻辑 → 回到等待
+    ↓ 无事件时 CPU 占用 0%
+```
+
+**事件标志位定义**：
+
+| 标志位 | 值 | 触发源 | 含义 |
+|--------|-----|--------|------|
+| `EVENT_ALARM_START` | `1 << 0` | 0x01 寻物命令 | 启动蜂鸣器+LED，广播status→0x01 |
+| `EVENT_ALARM_STOP` | `1 << 1` | 0x00 停止命令 | 关闭声光，广播status→0x00 |
+| `EVENT_INVENTORY` | `1 << 2` | 0x02 盘点命令 | Notify回复当前数据 |
+| `EVENT_UPDATE_QTY` | `1 << 3` | 0x10 更新数量 | 更新qty，刷新广播 |
+| `EVENT_BIND_TAG` | `1 << 4` | 0x20 绑定命令 | 写NV绑定tag_id |
+| `EVENT_UNBIND_TAG` | `1 << 5` | 0x21 解绑命令 | 清除tag_id+qty |
 
 ---
 
@@ -50,16 +75,20 @@ My_project_2x/
 ### 模块依赖关系
 
 ```
-main.c (业务编排)
-  ├── hardware_hal        ← 声光控制
-  ├── sle_slave           ← SLE协议栈
+main.c (业务编排 + 事件循环)
+  ├── osEventFlagsWait()   ← LiteOS 原生阻塞等待，0% CPU
+  ├── hardware_hal        ← 声光控制（PWM硬件驱动，CPU可休眠）
+  ├── sle_slave           ← SLE协议栈（回调中只设标志位，不执行业务）
   │     └── shared_protocol ← 广播编码序列化
   ├── storage_sync        ← 数据持久化
   │     └── shared_protocol ← adv_field 结构体定义
   └── shared_protocol     ← 命令解析
 ```
 
-**核心原则**：`shared_protocol` 是契约中心，所有模块通过它交换数据结构，避免直接耦合。
+**核心原则**：
+- `shared_protocol` 是契约中心，所有模块通过它交换数据结构，避免直接耦合
+- SLE 回调只做一件事：`osEventFlagsSet()`，不阻塞 bt_service 任务
+- 主循环用 `osEventFlagsWait(osWaitForever)` 纯阻塞，无事件时 0% CPU
 
 ---
 
@@ -81,6 +110,30 @@ typedef struct {
 ```
 
 **端序要求**：所有多字节字段必须按**大端序**（网络字节序）序列化，使用 `proto_write_u16_be()` / `proto_write_u32_be()` 辅助函数。ARM Cortex-M 为小端模式，禁止直接 `memcpy` 结构体到广播buffer。
+
+### 3.1.1 静态广播载荷（零拷贝优化）
+
+广播 payload 使用全局静态 buffer，编译时分配在数据区，地址固定，避免内存碎片：
+
+```
+g_adv_payload[16]（全局静态区，地址固定）
+┌──────────────────────────────────────────────────────────────┐
+│ AD头部 │ 厂商ID │ magic(4B) │ tag_id(2B) │ qty(2B) │ status │ battery │ seq(2B) │
+│ [0-1]  │ [2-3]  │ [4-7]     │ [8-9]      │ [10-11] │ [12]   │ [13]    │ [14-15] │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**偏移量宏定义**（单字节直接修改，零拷贝）：
+
+| 字段 | 偏移量 | 修改方式 |
+|------|--------|---------|
+| tag_id | `ADV_OFFSET_TAG_ID = 8` | `g_adv_payload[8..9] = proto_write_u16_be` |
+| qty | `ADV_OFFSET_QTY = 10` | `g_adv_payload[10..11] = proto_write_u16_be` |
+| status | `ADV_OFFSET_STATUS = 12` | `g_adv_payload[12] = new_status` |
+| battery | `ADV_OFFSET_BATTERY = 13` | `g_adv_payload[13] = new_battery` |
+| seq | `ADV_OFFSET_SEQ = 14` | `g_adv_payload[14..15] = proto_write_u16_be` |
+
+**刷新流程**：原地修改 buffer → Stop → `sle_set_announce_data(指针)` → Start（微秒级完成）
 
 ### 3.2 SSAP命令码
 
@@ -163,7 +216,33 @@ uint32_t val = proto_read_u32_be(buf);
 
 **禁止**：直接 `memcpy` 结构体到协议buffer（ARM小端会导致端序反转）。
 
-### 4.5 安全保护
+### 4.5 LiteOS 事件驱动规范
+
+**强制规则**：主循环必须使用 LiteOS 原生 API，禁止轮询：
+
+```c
+// 创建事件标志组（初始化阶段）
+osEventFlagsId_t g_event_flags = osEventFlagsNew(NULL);
+
+// 回调/中断上下文：设置标志位（非阻塞，<1μs）
+osEventFlagsSet(g_event_flags, EVENT_ALARM_START);
+
+// 主循环：纯阻塞等待（0% CPU，直到有事件到达）
+uint32_t flags = osEventFlagsWait(g_event_flags, ALL_EVENTS, osFlagsWaitAny, osWaitForever);
+```
+
+**禁止**：
+- 禁止在主循环使用 `while(1) { msleep(50); }` 轮询
+- 禁止在回调中执行业务逻辑（只允许 `osEventFlagsSet`）
+- 禁止使用 `volatile` 标志位 + 轮询替代事件标志组
+
+**回调职责边界**：SLE 回调（bt_service 任务上下文）只做：
+1. 解析命令（`shared_proto_parse_unicast_cmd`）
+2. 保存参数到全局变量（`g_cmd`, `g_conn_id`）
+3. `osEventFlagsSet(g_event_flags, EVENT_XXX)`
+4. 立即返回
+
+### 4.6 安全保护
 
 - **硬件安全**：蜂鸣器/LED必须有自动关闭定时器，防止电池耗尽
 - **PM兼容**：进入低功耗前必须关闭所有外设（beep_off + led_off）
@@ -523,12 +602,13 @@ git checkout -b release/v1.0.0 v1.0.0
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| P0 | 电池ADC采集 | 替换硬编码battery=100，实现真实电量读取 |
+| P0 | LiteOS事件驱动重构 | `osEventFlagsWait` 替换轮询，主循环 0% CPU |
+| P0 | 静态广播载荷 | 零拷贝静态 buffer，偏移量直接修改，解决内存碎片 |
+| P0 | 蜂鸣器PWM频率修复 | `BUZZER_PWM_LOW_TIME/HIGH_TIME` 从 100 改为 8000（2kHz） |
 | P0 | 与WS63联调 | 验证完整链路：ESP32→WS63→BS21E |
-| P1 | 多连接测试 | 验证4连接并发场景下的稳定性 |
-| P1 | 广播数据包优化 | 确保广播payload在多连接下正确刷新 |
-| P2 | 低功耗优化 | PM超时调优、实际功耗测量 |
-| P2 | OTA升级 | 验证OTA流程中MAC/tag_id/NV数据保留 |
+| P1 | 硬件PWM+定时器寻物 | CPU休眠，硬件独立输出方波+定时关闭 |
+| P1 | 电池ADC采集 | 替换硬编码battery=100，实现真实电量读取 |
+| P2 | NV Flash防磨损 | qty只存RAM，定期/低电刷新Flash（延后到OTA阶段） |
 
 ### 7.2 低功耗状态机
 
@@ -543,11 +623,35 @@ Work ──(5s无活动)──> Standby ──(30s无活动)──> Sleep
 - Standby→Sleep：停止SLE广播
 - 唤醒：重新启动SLE广播
 
-### 7.3 待确认事项
+### 7.3 硬件 PWM + 定时器寻物优化
+
+寻物期间 CPU 可休眠，由硬件独立完成声光输出：
+
+```
+收到 0x01 寻物命令（主循环处理）：
+  1. 配置 PWM 硬件输出 2kHz 方波 → 独立运行，不需要CPU
+  2. 配置硬件定时器 = 15s → 独立运行，不需要CPU
+  3. CPU 进入 Standby/Sleep（PWM + Timer 由硬件时钟驱动）
+
+15秒后：
+  硬件定时器中断 → ISR 关闭 PWM + osEventFlagsSet(EVENT_ALARM_STOP)
+  → CPU 醒来，主循环处理后续逻辑
+```
+
+| 对比 | 当前 | 优化后 |
+|------|------|--------|
+| CPU 状态 | 运行 15s（忙等） | 休眠 15s |
+| PWM 输出 | 软件轮询驱动 | 硬件自动输出 |
+| 定时器 | `osal_timer`（软件） | 硬件 Timer/RTC 中断 |
+| 功耗 | 高（CPU + PWM） | 低（仅 PWM + Timer） |
+
+### 7.4 待确认事项
 
 - 连接间隔单位（125μs 还是 0.25ms）
 - 出库语义（仅清qty还是解绑）
 - 多连接下的广播刷新策略
+- SLE SDK `sle_set_announce_data` 是拷贝 buffer 还是保存指针（影响零拷贝方案）
+- PWM 外设在 Standby/Sleep 下是否继续输出
 
 ---
 
@@ -555,10 +659,10 @@ Work ──(5s无活动)──> Standby ──(30s无活动)──> Sleep
 
 | 文件 | 职责 | 关键函数 |
 |------|------|---------|
-| `app/main.c` | 业务编排 | `my_project_2x_entry()`, `my_project_2x_on_unicast_cmd()` |
+| `app/main.c` | 业务编排 + 事件循环 | `my_project_2x_entry()`, `osEventFlagsWait()`, `my_project_2x_exec_cmd()` |
 | `components/shared_protocol/shared_protocol.c` | 协议解析 | `shared_proto_parse_unicast_cmd()`, `shared_proto_serialize_*()` |
 | `components/hardware_hal/hardware_hal.c` | 声光驱动 | `hardware_hal_beep_on_for_ms()`, `hardware_hal_led_on_for_ms()` |
-| `components/sle_slave/sle_slave_mgr.c` | SLE通信 | `sle_slave_init()`, `sle_slave_refresh_adv_payload()` |
+| `components/sle_slave/sle_slave_mgr.c` | SLE通信 | `sle_slave_init()`, `sle_slave_refresh_adv_payload()`, `g_adv_payload[]` |
 | `components/storage_sync/storage_sync.c` | 数据存储 | `storage_sync_publish()`, `storage_sync_set_qty()` |
 
 ---
