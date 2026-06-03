@@ -1,5 +1,6 @@
 #include "app_init.h"
 #include "common_def.h"
+#include "cmsis_os2.h"
 #include "errcode.h"
 #include "hardware_hal.h"
 #include "pm.h"
@@ -22,12 +23,31 @@
 #define MY_PROJECT_2X_DEFAULT_QTY 0u
 #define MY_PROJECT_2X_DEFAULT_BATTERY 100u
 
+/* 事件标志位定义 */
+#define EVENT_ALARM_START   (1u << 0)  /* 0x01 寻物命令 */
+#define EVENT_ALARM_STOP    (1u << 1)  /* 0x00 停止命令 */
+#define EVENT_INVENTORY     (1u << 2)  /* 0x02 盘点命令 */
+#define EVENT_UPDATE_QTY    (1u << 3)  /* 0x10 更新数量 */
+#define EVENT_BIND_TAG      (1u << 4)  /* 0x20 绑定命令 */
+#define EVENT_UNBIND_TAG    (1u << 5)  /* 0x21 解绑命令 */
+#define EVENT_UART_DATA     (1u << 6)  /* UART数据到达 */
+#define EVENT_ALL           (EVENT_ALARM_START | EVENT_ALARM_STOP | EVENT_INVENTORY | \
+                             EVENT_UPDATE_QTY | EVENT_BIND_TAG | EVENT_UNBIND_TAG | \
+                             EVENT_UART_DATA)
+
 #define UART_SELFTEST_BUS UART_BUS_0
 #define UART_SELFTEST_RX_BUF_SIZE 32u
 #define UART_SELFTEST_BAUDRATE 115200
 
 static osal_timer g_find_status_restore_timer = {0};
 static bool g_find_status_timer_inited = false;
+
+/* 事件标志组（LiteOS原生API） */
+static osEventFlagsId_t g_event_flags = NULL;
+
+/* SLE命令缓冲区（回调写入，主循环读取） */
+static shared_proto_unicast_cmd_t g_pending_cmd = {0};
+static uint16_t g_pending_conn_id = 0;
 
 static uint8_t g_uart_rx_buf[UART_SELFTEST_RX_BUF_SIZE] = {0};
 static volatile uint16_t g_uart_rx_len = 0;
@@ -145,6 +165,7 @@ static void my_project_2x_uart_selftest_exec(const uint8_t *data, uint16_t len)
     my_project_2x_exec_cmd(&cmd, 0, "UART_TEST");
 }
 
+/* UART回调：保存数据+设置事件标志（中断上下文，只做最小操作） */
 static void my_project_2x_uart_rx_callback(const void *buffer, uint16_t length, bool error)
 {
     if (error || buffer == NULL || length == 0) {
@@ -160,6 +181,11 @@ static void my_project_2x_uart_rx_callback(const void *buffer, uint16_t length, 
         (void)memcpy_s(g_uart_rx_buf + g_uart_rx_len, UART_SELFTEST_RX_BUF_SIZE - g_uart_rx_len,
                         buffer, copy_len);
         g_uart_rx_len += copy_len;
+
+        /* 设置UART数据到达事件 */
+        if (g_event_flags != NULL) {
+            (void)osEventFlagsSet(g_event_flags, EVENT_UART_DATA);
+        }
     }
 }
 
@@ -259,8 +285,12 @@ static void my_project_2x_send_inventory_rsp(uint16_t conn_id)
 {
     osal_printk("%s[BP] send_inventory_rsp enter conn_id:0x%x\r\n", MY_PROJECT_2X_LOG, conn_id);
 
+    /* 盘点时读取最新电量 */
+    uint8_t battery = hw_hal_battery_read_percent();
+
     shared_proto_adv_field_t field = {0};
     storage_sync_get_field(&field);
+    field.battery = battery;
 
     shared_proto_inventory_rsp_t rsp = {
         .cmd = SHARED_PROTO_RSP_INVENTORY,
@@ -339,17 +369,40 @@ static void my_project_2x_send_unbind_rsp(uint16_t conn_id, uint16_t old_tag_id,
     }
 }
 
+/* SLE回调：只保存命令+设置事件标志，不执行业务逻辑（避免阻塞bt_service任务） */
 static void my_project_2x_on_unicast_cmd(uint16_t conn_id, const shared_proto_unicast_cmd_t *cmd)
 {
-    if (cmd == NULL) {
-        osal_printk("%s[BP] on_unicast_cmd FAIL cmd=NULL\r\n", MY_PROJECT_2X_LOG);
+    if (cmd == NULL || g_event_flags == NULL) {
+        osal_printk("%s[BP] on_unicast_cmd FAIL cmd=%s flags=%s\r\n",
+                    MY_PROJECT_2X_LOG,
+                    cmd ? "OK" : "NULL",
+                    g_event_flags ? "OK" : "NULL");
         return;
     }
 
     osal_printk("%s[BP] on_unicast_cmd conn_id:0x%x action:%u qty:%u tag_id:%u\r\n",
                 MY_PROJECT_2X_LOG, conn_id, cmd->action, cmd->qty, cmd->tag_id);
 
-    my_project_2x_exec_cmd(cmd, conn_id, "BP");
+    /* 保存命令到全局缓冲区 */
+    g_pending_cmd = *cmd;
+    g_pending_conn_id = conn_id;
+
+    /* 根据命令类型设置对应事件标志 */
+    uint32_t event = 0;
+    switch (cmd->action) {
+        case SHARED_PROTO_ACTION_FIND_ME:    event = EVENT_ALARM_START; break;
+        case SHARED_PROTO_ACTION_STOP_FIND:  event = EVENT_ALARM_STOP; break;
+        case SHARED_PROTO_ACTION_INVENTORY:  event = EVENT_INVENTORY; break;
+        case SHARED_PROTO_ACTION_UPDATE_QTY: event = EVENT_UPDATE_QTY; break;
+        case SHARED_PROTO_ACTION_BIND_TAG:   event = EVENT_BIND_TAG; break;
+        case SHARED_PROTO_ACTION_UNBIND_TAG: event = EVENT_UNBIND_TAG; break;
+        default:
+            osal_printk("%s[BP] unknown action:%u\r\n", MY_PROJECT_2X_LOG, cmd->action);
+            return;
+    }
+
+    (void)osEventFlagsSet(g_event_flags, event);
+    osal_printk("%s[BP] event set: 0x%x\r\n", MY_PROJECT_2X_LOG, event);
 }
 
 static int32_t my_project_2x_work_to_standby(uintptr_t arg)
@@ -429,17 +482,14 @@ static void my_project_2x_on_conn_state_changed(uint16_t conn_id, bool connected
     (void)storage_sync_publish();
 }
 
-static void my_project_2x_entry(void)
+/* 初始化硬件和协议栈 */
+static errcode_t my_project_2x_init_all(void)
 {
-    osal_printk("%s[BP] ===== APP ENTRY START =====\r\n", MY_PROJECT_2X_LOG);
-
     my_project_2x_pm_init();
     osal_printk("%s[BP] pm_init done\r\n", MY_PROJECT_2X_LOG);
 
     if (hardware_hal_init() != HW_HAL_OK) {
         osal_printk("%s[BP] hardware_hal_init FAIL\r\n", MY_PROJECT_2X_LOG);
-    } else {
-        osal_printk("%s[BP] hardware_hal_init OK\r\n", MY_PROJECT_2X_LOG);
     }
 
     sle_slave_callbacks_t slave_cb = {
@@ -450,9 +500,8 @@ static void my_project_2x_entry(void)
     errcode_t ret = sle_slave_init(&slave_cb);
     if (ret != ERRCODE_SUCC) {
         osal_printk("%s[BP] sle_slave_init FAIL ret:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
-        return;
+        return ret;
     }
-    osal_printk("%s[BP] sle_slave_init OK\r\n", MY_PROJECT_2X_LOG);
 
     storage_sync_adapter_t adapter = {
         .refresh_adv_cb = sle_slave_refresh_adv_payload,
@@ -463,42 +512,104 @@ static void my_project_2x_entry(void)
                             &adapter);
     if (ret != ERRCODE_SUCC) {
         osal_printk("%s[BP] storage_sync_init FAIL ret:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
-        return;
-    }
-    osal_printk("%s[BP] storage_sync_init OK\r\n", MY_PROJECT_2X_LOG);
-
-    ret = storage_sync_publish();
-    if (ret != ERRCODE_SUCC) {
-        osal_printk("%s[BP] initial publish FAIL ret:0x%x\r\n", MY_PROJECT_2X_LOG, ret);
-    } else {
-        osal_printk("%s[BP] initial publish OK\r\n", MY_PROJECT_2X_LOG);
+        return ret;
     }
 
-    osal_printk("%s[BP] ===== APP ENTRY DONE, entering main loop =====\r\n", MY_PROJECT_2X_LOG);
+    (void)storage_sync_publish();
 
     errcode_t uart_ret = my_project_2x_uart_selftest_init();
     if (uart_ret != ERRCODE_SUCC) {
         osal_printk("%s[BP] uart_selftest_init FAIL ret:0x%x\r\n", MY_PROJECT_2X_LOG, uart_ret);
     }
 
+    osal_printk("%s[BP] init_all OK\r\n", MY_PROJECT_2X_LOG);
+    return ERRCODE_SUCC;
+}
+
+/* 处理UART数据 */
+static void my_project_2x_process_uart_data(void)
+{
+    if (g_uart_rx_len == 0) {
+        return;
+    }
+
+    uint16_t len = g_uart_rx_len;
+    uint8_t local_buf[UART_SELFTEST_RX_BUF_SIZE] = {0};
+    (void)memcpy_s(local_buf, UART_SELFTEST_RX_BUF_SIZE, g_uart_rx_buf, len);
+    g_uart_rx_len = 0;
+
+    osal_printk("%s[UART_TEST] recv %u bytes:", MY_PROJECT_2X_LOG, len);
+    for (uint16_t i = 0; i < len; i++) {
+        osal_printk(" %02X", local_buf[i]);
+    }
+    osal_printk("\r\n");
+
+    my_project_2x_uart_selftest_exec(local_buf, len);
+}
+
+/* 事件驱动主循环（0% CPU占用，纯阻塞等待） */
+static void my_project_2x_event_loop(void)
+{
+    osal_printk("%s[BP] entering event loop\r\n", MY_PROJECT_2X_LOG);
+
     while (1) {
-        if (g_uart_rx_len > 0) {
-            uint16_t len = g_uart_rx_len;
-            uint8_t local_buf[UART_SELFTEST_RX_BUF_SIZE] = {0};
-            (void)memcpy_s(local_buf, UART_SELFTEST_RX_BUF_SIZE, g_uart_rx_buf, len);
-            g_uart_rx_len = 0;
-
-            osal_printk("%s[UART_TEST] recv %u bytes:", MY_PROJECT_2X_LOG, len);
-            for (uint16_t i = 0; i < len; i++) {
-                osal_printk(" %02X", local_buf[i]);
-            }
-            osal_printk("\r\n");
-
-            my_project_2x_uart_selftest_exec(local_buf, len);
+        /* 纯阻塞等待任意事件（CPU休眠，不消耗算力） */
+        uint32_t flags = osEventFlagsWait(g_event_flags, EVENT_ALL,
+                                          osFlagsWaitAny, osWaitForever);
+        if (flags == (uint32_t)osFlagsErrorTimeout ||
+            flags == (uint32_t)osFlagsErrorResource) {
+            continue;
         }
 
-        osal_msleep(50);
+        (void)uapi_pm_work_state_reset();
+
+        /* 处理SLE命令事件 */
+        if (flags & EVENT_ALARM_START) {
+            my_project_2x_exec_cmd(&g_pending_cmd, g_pending_conn_id, "BP");
+        }
+        if (flags & EVENT_ALARM_STOP) {
+            my_project_2x_exec_cmd(&g_pending_cmd, g_pending_conn_id, "BP");
+        }
+        if (flags & EVENT_INVENTORY) {
+            my_project_2x_exec_cmd(&g_pending_cmd, g_pending_conn_id, "BP");
+        }
+        if (flags & EVENT_UPDATE_QTY) {
+            my_project_2x_exec_cmd(&g_pending_cmd, g_pending_conn_id, "BP");
+        }
+        if (flags & EVENT_BIND_TAG) {
+            my_project_2x_exec_cmd(&g_pending_cmd, g_pending_conn_id, "BP");
+        }
+        if (flags & EVENT_UNBIND_TAG) {
+            my_project_2x_exec_cmd(&g_pending_cmd, g_pending_conn_id, "BP");
+        }
+
+        /* 处理UART数据事件 */
+        if (flags & EVENT_UART_DATA) {
+            my_project_2x_process_uart_data();
+        }
     }
+}
+
+static void my_project_2x_entry(void)
+{
+    osal_printk("%s[BP] ===== APP ENTRY START =====\r\n", MY_PROJECT_2X_LOG);
+
+    /* 创建事件标志组 */
+    g_event_flags = osEventFlagsNew(NULL);
+    if (g_event_flags == NULL) {
+        osal_printk("%s[BP] create event flags FAIL\r\n", MY_PROJECT_2X_LOG);
+        return;
+    }
+    osal_printk("%s[BP] event flags created\r\n", MY_PROJECT_2X_LOG);
+
+    /* 初始化所有模块 */
+    if (my_project_2x_init_all() != ERRCODE_SUCC) {
+        osal_printk("%s[BP] init_all FAIL\r\n", MY_PROJECT_2X_LOG);
+        return;
+    }
+
+    /* 进入事件驱动主循环（0% CPU） */
+    my_project_2x_event_loop();
 }
 
 app_run(my_project_2x_entry);

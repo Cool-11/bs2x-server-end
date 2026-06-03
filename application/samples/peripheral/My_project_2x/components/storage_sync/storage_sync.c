@@ -3,6 +3,7 @@
 #include "common_def.h"
 #include "nv.h"
 #include "soc_osal.h"
+#include "../hardware_hal/hardware_hal.h"
 
 #define STORAGE_SYNC_LOG "[BS2x_SYNC]"
 
@@ -62,7 +63,9 @@ errcode_t storage_sync_init(uint16_t tag_id,
 
     g_sync.field.magic = SHARED_PROTO_MAGIC;
     g_sync.field.qty = qty;
-    g_sync.field.status = SHARED_PROTO_STATUS_NORMAL;
+    /* 根据tag_id判断初始状态：tag_id==0表示未配网 */
+    g_sync.field.status = (g_sync.field.tag_id == 0) ?
+                          SHARED_PROTO_STATUS_UNBOUND : SHARED_PROTO_STATUS_IDLE;
     g_sync.field.battery = battery;
     g_sync.field.seq = 0;
     g_sync.inited = true;
@@ -85,17 +88,22 @@ errcode_t storage_sync_set_qty(uint16_t qty)
     g_sync.field.qty = qty;
     g_sync.field.seq++;
 
-    if (qty == 0) {
-        g_sync.field.status = SHARED_PROTO_STATUS_OUTSTOCK;
-        osal_printk("%s[BP] set_qty=0 OUTSTOCK status=0x%02x seq=%u\r\n",
-                    STORAGE_SYNC_LOG, g_sync.field.status, g_sync.field.seq);
+    /* 根据tag_id和qty决定状态：
+     * tag_id==0 → UNBOUND(3)
+     * tag_id≠0 且 qty>0 → IN_USE(2)
+     * tag_id≠0 且 qty==0 → IDLE(0)
+     */
+    if (g_sync.field.tag_id == 0) {
+        g_sync.field.status = SHARED_PROTO_STATUS_UNBOUND;
+    } else if (qty > 0) {
+        g_sync.field.status = SHARED_PROTO_STATUS_IN_USE;
     } else {
-        if (g_sync.field.status == SHARED_PROTO_STATUS_OUTSTOCK) {
-            g_sync.field.status = SHARED_PROTO_STATUS_NORMAL;
-        }
-        osal_printk("%s[BP] set_qty=%u status=0x%02x seq=%u\r\n",
-                    STORAGE_SYNC_LOG, qty, g_sync.field.status, g_sync.field.seq);
+        g_sync.field.status = SHARED_PROTO_STATUS_IDLE;
     }
+
+    osal_printk("%s[BP] set_qty=%u tag_id=%u status=0x%02x seq=%u\r\n",
+                STORAGE_SYNC_LOG, qty, g_sync.field.tag_id,
+                g_sync.field.status, g_sync.field.seq);
     return ERRCODE_SUCC;
 }
 
@@ -109,11 +117,19 @@ errcode_t storage_sync_set_find_status(bool active)
     if (active) {
         g_sync.field.status = SHARED_PROTO_STATUS_FINDING;
     } else {
-        g_sync.field.status = (g_sync.field.qty == 0) ? SHARED_PROTO_STATUS_OUTSTOCK : SHARED_PROTO_STATUS_NORMAL;
+        /* 恢复时根据tag_id和qty判断状态 */
+        if (g_sync.field.tag_id == 0) {
+            g_sync.field.status = SHARED_PROTO_STATUS_UNBOUND;
+        } else if (g_sync.field.qty > 0) {
+            g_sync.field.status = SHARED_PROTO_STATUS_IN_USE;
+        } else {
+            g_sync.field.status = SHARED_PROTO_STATUS_IDLE;
+        }
     }
     g_sync.field.seq++;
     osal_printk("%s[BP] find_status=%s restore_to=0x%02x seq=%u\r\n",
-                STORAGE_SYNC_LOG, active ? "FINDING" : "RESTORE", g_sync.field.status, g_sync.field.seq);
+                STORAGE_SYNC_LOG, active ? "FINDING" : "RESTORE",
+                g_sync.field.status, g_sync.field.seq);
     return ERRCODE_SUCC;
 }
 
@@ -143,8 +159,13 @@ errcode_t storage_sync_set_tag_id(uint16_t tag_id)
     }
 
     g_sync.field.tag_id = tag_id;
+    /* 绑定成功后状态变为IDLE(0)或IN_USE(2) */
+    g_sync.field.status = (g_sync.field.qty > 0) ?
+                          SHARED_PROTO_STATUS_IN_USE : SHARED_PROTO_STATUS_IDLE;
     g_sync.field.seq++;
-    osal_printk("%s[BP] set_tag_id=%u seq=%u\r\n", STORAGE_SYNC_LOG, g_sync.field.tag_id, g_sync.field.seq);
+    osal_printk("%s[BP] set_tag_id=%u status=0x%02x seq=%u\r\n",
+                STORAGE_SYNC_LOG, g_sync.field.tag_id,
+                g_sync.field.status, g_sync.field.seq);
     return ERRCODE_SUCC;
 }
 
@@ -165,9 +186,9 @@ errcode_t storage_sync_clear_tag_id(void)
 
     g_sync.field.tag_id = 0;
     g_sync.field.qty = 0;
-    g_sync.field.status = SHARED_PROTO_STATUS_NORMAL;
+    g_sync.field.status = SHARED_PROTO_STATUS_UNBOUND;
     g_sync.field.seq++;
-    osal_printk("%s[BP] clear_tag_id OK old=%u new=0 qty=0 seq=%u\r\n",
+    osal_printk("%s[BP] clear_tag_id OK old=%u new=0 status=UNBOUND seq=%u\r\n",
                 STORAGE_SYNC_LOG, old_tag_id, g_sync.field.seq);
     return ERRCODE_SUCC;
 }
@@ -177,6 +198,19 @@ errcode_t storage_sync_publish(void)
     if (!g_sync.inited) {
         osal_printk("%s[BP] publish FAIL not inited\r\n", STORAGE_SYNC_LOG);
         return ERRCODE_FAIL;
+    }
+
+    /* 读取最新电池电量 */
+    g_sync.field.battery = hw_hal_battery_read_percent();
+
+    /* 低电量判断：battery ≤ 10% 时覆盖状态为 LOW_BATTERY */
+    uint8_t low_threshold = 10;
+    if (g_sync.field.battery <= low_threshold &&
+        g_sync.field.status != SHARED_PROTO_STATUS_LOW_BATTERY) {
+        osal_printk("%s[BP] LOW_BATTERY detected bat:%u, override status to 0x%02x\r\n",
+                    STORAGE_SYNC_LOG, g_sync.field.battery,
+                    SHARED_PROTO_STATUS_LOW_BATTERY);
+        g_sync.field.status = SHARED_PROTO_STATUS_LOW_BATTERY;
     }
 
     if (!shared_proto_adv_field_is_valid(&g_sync.field)) {

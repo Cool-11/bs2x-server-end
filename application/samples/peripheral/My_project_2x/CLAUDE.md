@@ -3,22 +3,22 @@
 > 适用于：`application/samples/peripheral/My_project_2x/`
 > 芯片平台：BS21E（SLE Server端）
 > 系统角色：星闪多模态仓储管家系统 — 微功耗标签端
-
----
-
 ## 一、项目概述
 
-### 1.1 系统三端架构
+### 1.1 系统双端架构
 
 ```
-┌──────────┐    JSON/串口    ┌──────────┐    SLE     ┌──────────┐
-│  ESP32   │ ◄────────────► │  WS63    │ ◄───────► │  BS21E   │
-│ 串口屏   │                │  Client  │            │  Server  │
-└──────────┘                └──────────┘            └──────────┘
+┌──────────────────────┐    SLE     ┌──────────────┐
+│       WS63           │ ◄───────► │    BS21E     │
+│  (串口屏 + 网关)     │           │  (标签群)    │
+│  - 用户交互界面      │           │  - 数据存储   │
+│  - SLE Client        │           │  - 广播       │
+│  - 映射表管理        │           │  - 寻物执行   │
+│  - TF卡存储          │           │  - 低功耗     │
+└──────────────────────┘           └──────────────┘
 ```
 
-- **ESP32**：用户交互界面（选区、添加数量、触发寻物）
-- **WS63**：SLE通信、映射表管理、协议转发
+- **WS63**：串口屏交互、SLE通信、映射表管理、TF卡存储、RSSI扫描
 - **BS21E**：标签数据存储、广播、寻物执行、低功耗管理
 
 ### 1.2 BS21E 端职责
@@ -29,7 +29,6 @@
 4. 无连接超时进入低功耗 Standby/Sleep
 
 ### 1.3 运行架构（LiteOS 事件驱动）
-
 ```
 bt_service 任务（SDK内部，SLE协议栈）
     ↓ SSAP Write 回调
@@ -54,9 +53,7 @@ bt_service 任务（SDK内部，SLE协议栈）
 | `EVENT_UNBIND_TAG` | `1 << 5` | 0x21 解绑命令 | 清除tag_id+qty |
 
 ---
-
 ## 二、目录结构
-
 ```
 My_project_2x/
 ├── CLAUDE.md               # 本文件：开发指南
@@ -73,7 +70,6 @@ My_project_2x/
 ```
 
 ### 模块依赖关系
-
 ```
 main.c (业务编排 + 事件循环)
   ├── osEventFlagsWait()   ← LiteOS 原生阻塞等待，0% CPU
@@ -89,33 +85,26 @@ main.c (业务编排 + 事件循环)
 - `shared_protocol` 是契约中心，所有模块通过它交换数据结构，避免直接耦合
 - SLE 回调只做一件事：`osEventFlagsSet()`，不阻塞 bt_service 任务
 - 主循环用 `osEventFlagsWait(osWaitForever)` 纯阻塞，无事件时 0% CPU
-
----
-
+--
 ## 三、协议规范
 
 ### 3.1 广播数据结构（12字节）
-
 ```c
 #pragma pack(push, 1)
 typedef struct {
     uint32_t magic;      // 0xAABBCCDD（大端序，用于过滤BS2x设备）
     uint16_t tag_id;     // 标签ID（配网时由WS63写入，默认0）
     uint16_t qty;        // 当前数量
-    uint8_t  status;     // 0x00=正常, 0x01=寻物中, 0x02=出库
+    uint8_t  status;     // 0x00=空闲, 0x01=寻物中, 0x02=使用中, 0x03=未配网
     uint8_t  battery;    // 电量百分比（0~100）
     uint16_t seq;        // 序列号（每次更新递增）
 } shared_proto_adv_field_t;
 #pragma pack(pop)
 ```
-
 **端序要求**：所有多字节字段必须按**大端序**（网络字节序）序列化，使用 `proto_write_u16_be()` / `proto_write_u32_be()` 辅助函数。ARM Cortex-M 为小端模式，禁止直接 `memcpy` 结构体到广播buffer。
-
 ### 3.1.1 静态广播载荷（零拷贝优化）
-
 广播 payload 使用全局静态 buffer，编译时分配在数据区，地址固定，避免内存碎片：
-
-```
+``
 g_adv_payload[16]（全局静态区，地址固定）
 ┌──────────────────────────────────────────────────────────────┐
 │ AD头部 │ 厂商ID │ magic(4B) │ tag_id(2B) │ qty(2B) │ status │ battery │ seq(2B) │
@@ -137,22 +126,23 @@ g_adv_payload[16]（全局静态区，地址固定）
 
 ### 3.2 SSAP命令码
 
-| 命令码 | 含义 | 数据格式 | 回复 |
-|--------|------|---------|------|
-| 0x00 | 停止寻物 | `[0x00]` | 无 |
-| 0x01 | 寻物 | `[0x01]` | 无（广播status→0x01，15s后自动恢复0x00） |
-| 0x02 | 盘点 | `[0x02]` | Notify `[0x82, tag_id(2B), qty(2B), status, battery, seq(2B)]` 共9字节 |
-| 0x10 | 更新数量 | `[0x10, qty_hi, qty_lo]` | 无（广播qty实时同步，延迟<100ms） |
-| 0x20 | 绑定tag_id | `[0x20, tag_id_hi, tag_id_lo]` | Notify `[0xA0, tag_id(2B)]` 成功 / `[0xAF, tag_id(2B)]` 失败 |
-| 0x21 | 解绑标签 | `[0x21]` | Notify `[0xA1, old_tag_id(2B)]` 成功 / `[0xAF, old_tag_id(2B)]` 失败 |
+| 命令码 | 含义 | 数据格式 | 回复 | status变化 |
+|--------|------|---------|------|-----------|
+| 0x00 | 停止寻物 | `[0x00]` | 无 | 恢复原状态（根据tag_id和qty判断） |
+| 0x01 | 寻物 | `[0x01]` | 无 | 广播status→0x01，15s后自动恢复 |
+| 0x02 | 盘点 | `[0x02]` | Notify `[0x82, tag_id(2B), qty(2B), status, battery, seq(2B)]` 共9字节 | 无变化 |
+| 0x10 | 更新数量 | `[0x10, qty_hi, qty_lo]` | 无 | qty>0→0x02, qty=0→0x00 |
+| 0x20 | 绑定tag_id | `[0x20, tag_id_hi, tag_id_lo]` | Notify `[0xA0, tag_id(2B)]` 成功 / `[0xAF, tag_id(2B)]` 失败 | 绑定成功→0x00或0x02 |
+| 0x21 | 解绑标签 | `[0x21]` | Notify `[0xA1, old_tag_id(2B)]` 成功 / `[0xAF, old_tag_id(2B)]` 失败 | 解绑后→0x03 |
 
-### 3.3 status字段含义
+### 3.3 status字段含义（与WS63端统一）
 
-| 值 | 含义 | 触发条件 |
-|----|------|---------|
-| 0x00 | NORMAL | 默认/寻物恢复 |
-| 0x01 | FINDING | 收到0x01寻物命令 |
-| 0x02 | OUTSTOCK | qty被设为0 |
+| 值 | 含义 | 触发条件 | 说明 |
+|----|------|---------|------|
+| 0x00 | IDLE（空闲） | 默认/寻物恢复/qty=0 | tag_id≠0但无库存 |
+| 0x01 | FINDING（寻物中） | 收到0x01寻物命令 | 15秒后自动恢复 |
+| 0x02 | IN_USE（使用中） | tag_id≠0且qty>0 | 正常工作状态 |
+| 0x03 | UNBOUND（未配网） | tag_id==0 | 首次上电或解绑后 |
 
 ### 3.4 NV存储Key分配
 
@@ -282,319 +272,12 @@ CONFIG_SAMPLE_SUPPORT_MY_PROJECT_2X=y
 | `MY_PROJECT_2X_PWM_PIN_MODE` | 40 | PWM引脚复用模式 |
 | `MY_PROJECT_2X_PWM_CHANNEL` | 0 | PWM通道 |
 | `MY_PROJECT_2X_PWM_GROUP_ID` | 0 | PWM分组（V151） |
+| `MY_PROJECT_2X_ADV_INTERVAL_MS` | 500 | 广播间隔(ms)，适配32标签场景 |
 
 ---
 
 ## 六、开发流程规范
 
-### 6.1 修改代码前
-
-1. **阅读现有代码**：先理解当前模块的实现逻辑和依赖关系
-2. **查阅SDK API**：禁止凭经验猜测函数名，必须参考SDK官方示例
-3. **确认协议兼容**：修改协议相关代码前，确认与WS63端的兼容性
-
-### 6.2 修改代码后
-
-1. **编译验证**：`./build.py standard-bs21e-1100e -c` 零错误零警告
-2. **日志验证**：串口日志可追踪完整调用链
-3. **边界处理**：NULL指针、buffer溢出、超时等场景
-4. **更新文档**：修改协议或接口时同步更新 `docs/` 下相关文档
-
-### 6.3 Git工程化使用指南
-
-#### 6.3.1 分支策略
-
-```
-master (稳定发布)
-  │
-  ├── dev (日常开发主线)
-  │     │
-  │     ├── feature/battery-adc    (功能分支)
-  │     ├── feature/multi-conn     (功能分支)
-  │     └── fix/adv-endian         (修复分支)
-  │
-  └── release/v1.0.0 (发布分支)
-```
-
-| 分支 | 用途 | 命名规范 | 生命周期 |
-|------|------|---------|---------|
-| `master` | 稳定版本，随时可编译烧录 | 固定 | 永久 |
-| `dev` | 日常开发集成分支 | 固定 | 永久 |
-| `feature/*` | 新功能开发 | `feature/功能名` | 完成后合并到dev并删除 |
-| `fix/*` | Bug修复 | `fix/问题描述` | 完成后合并到dev并删除 |
-| `release/*` | 版本发布准备 | `release/v版本号` | 发布后合并到master并删除 |
-
-#### 6.3.2 分支操作命令
-
-```bash
-# 查看当前分支和状态
-git status
-git branch -a                # 查看所有分支（含远程）
-
-# 创建并切换到功能分支（从dev拉出）
-git checkout dev
-git pull origin dev           # 先同步远程最新
-git checkout -b feature/battery-adc
-
-# 切换分支
-git checkout dev
-git checkout feature/battery-adc
-
-# 删除本地分支（已合并后）
-git branch -d feature/battery-adc
-
-# 删除远程分支
-git push origin --delete feature/battery-adc
-```
-
-#### 6.3.3 提交规范（Conventional Commits）
-
-**格式**：`<type>(<scope>): <subject>`
-
-| type | 含义 | 示例 |
-|------|------|------|
-| `feat` | 新功能 | `feat(hardware_hal): 新增电池ADC采集` |
-| `fix` | Bug修复 | `fix(shared_protocol): 修复广播端序错误` |
-| `refactor` | 重构（不改变功能） | `refactor(sle_slave): 拆分连接管理逻辑` |
-| `docs` | 文档更新 | `docs(progress): 更新第三轮迭代进度` |
-| `chore` | 构建/工具变更 | `chore(kconfig): 新增PWM配置项` |
-| `style` | 代码格式调整 | `style(main): 统一缩进和空格` |
-| `test` | 测试相关 | `test(uart): 新增UART自测命令` |
-| `perf` | 性能优化 | `perf(pm): 优化低功耗唤醒延迟` |
-
-**scope**（可选）：`shared_protocol` / `hardware_hal` / `sle_slave` / `storage_sync` / `main` / `kconfig` / `docs`
-
-**示例**：
-```bash
-git commit -m "feat(hardware_hal): 新增电池ADC采集，替换硬编码battery=100"
-git commit -m "fix(sle_slave): 修复多连接下广播刷新时序竞争"
-git commit -m "docs(ws63_cooperation_spec): 补充OTA升级流程说明"
-```
-
-#### 6.3.4 日常开发工作流
-
-**场景1：开发新功能**
-
-```bash
-# 1. 从dev创建功能分支
-git checkout dev
-git pull origin dev
-git checkout -b feature/battery-adc
-
-# 2. 开发过程中频繁提交（小步提交）
-git add components/hardware_hal/hardware_hal.c
-git commit -m "feat(hardware_hal): 实现ADC初始化和单次采样"
-
-git add components/hardware_hal/hardware_hal.h
-git commit -m "feat(hardware_hal): 新增battery_adc_read()接口声明"
-
-git add app/main.c
-git commit -m "feat(main): 集成电池ADC读取到主循环"
-
-# 3. 开发完成，合并回dev
-git checkout dev
-git pull origin dev                    # 先同步远程最新
-git merge --no-ff feature/battery-adc  # 合并（保留分支历史）
-git push origin dev
-
-# 4. 删除功能分支
-git branch -d feature/battery-adc
-git push origin --delete feature/battery-adc
-```
-
-**场景2：修复紧急Bug**
-
-```bash
-# 1. 从dev创建修复分支
-git checkout dev
-git checkout -b fix/adv-endian
-
-# 2. 修复并提交
-git add components/shared_protocol/shared_protocol.c
-git commit -m "fix(shared_protocol): 修复u32大端序列化字节顺序错误"
-
-# 3. 合并回dev
-git checkout dev
-git merge --no-ff fix/adv-endian
-git push origin dev
-git branch -d fix/adv-endian
-```
-
-**场景3：代码写到一半需要切分支处理其他事情**
-
-```bash
-# 暂存当前工作（不生成提交）
-git stash save "battery-adc: ADC初始化写到一半"
-
-# 切换到其他分支处理事情
-git checkout dev
-# ... 处理完 ...
-
-# 回来继续
-git checkout feature/battery-adc
-git stash pop    # 恢复暂存的内容
-
-# 查看暂存列表
-git stash list
-```
-
-#### 6.3.5 合并策略
-
-| 方式 | 命令 | 效果 | 适用场景 |
-|------|------|------|---------|
-| `--no-ff` | `git merge --no-ff feature/xxx` | 强制生成合并提交，保留分支历史 | **推荐**：功能分支合并到dev |
-| `--squash` | `git merge --squash feature/xxx` | 压缩为一个提交 | 小功能/修复，提交太碎时 |
-| `rebase` | `git rebase dev` | 变基，线性历史 | 个人分支同步dev最新代码 |
-
-```bash
-# 推荐：保留分支历史的合并
-git checkout dev
-git merge --no-ff feature/battery-adc -m "feat: 合并电池ADC功能分支"
-
-# 可选：压缩为单个提交（提交太碎时）
-git checkout dev
-git merge --squash feature/battery-adc
-git commit -m "feat(hardware_hal): 完成电池ADC采集功能"
-
-# 可选：变基（保持线性历史，个人分支用）
-git checkout feature/battery-adc
-git rebase dev
-# 如果有冲突，解决后 git rebase --continue
-```
-
-#### 6.3.6 冲突处理
-
-```bash
-# 合并时遇到冲突
-git merge --no-ff feature/xxx
-# CONFLICT (content): Merge conflict in app/main.c
-
-# 1. 查看冲突文件
-git status
-
-# 2. 打开冲突文件，找到冲突标记
-# <<<<<<< HEAD
-# 当前分支的代码
-# =======
-# 合并进来的代码
-# >>>>>>> feature/xxx
-
-# 3. 手动编辑，保留正确的代码，删除冲突标记
-
-# 4. 标记冲突已解决
-git add app/main.c
-
-# 5. 完成合并
-git commit -m "merge: 解决main.c冲突，保留双方修改"
-```
-
-#### 6.3.7 查看历史与追溯
-
-```bash
-# 查看提交历史（简洁模式）
-git log --oneline -20
-
-# 查看某个文件的修改历史
-git log --oneline app/main.c
-
-# 查看某次提交改了什么
-git show <commit-hash>
-
-# 查看某个函数是谁在什么时候改的（追溯）
-git blame app/main.c
-
-# 查看两个版本之间的差异
-git diff dev..feature/battery-adc
-
-# 查看工作区未提交的修改
-git diff
-git diff --staged    # 已add但未commit的
-```
-
-#### 6.3.8 撤销操作
-
-```bash
-# 撤销工作区的修改（未add）
-git checkout -- app/main.c           # 撤销单个文件
-git checkout -- .                     # 撤销所有
-
-# 撤销已add的文件（从暂存区移回工作区）
-git reset HEAD app/main.c
-
-# 撤销最近一次提交（保留修改在工作区）
-git reset --soft HEAD~1
-
-# 撤销最近一次提交（修改也丢弃，慎用！）
-git reset --hard HEAD~1
-
-# 安全方式：生成一个新的提交来"反做"某个提交
-git revert <commit-hash>
-```
-
-#### 6.3.9 .gitignore 配置
-
-本项目应忽略的文件（确认 `.gitignore` 中已包含）：
-
-```gitignore
-# 编译产物
-output/
-build/
-*.o
-*.elf
-*.bin
-*.hex
-
-# IDE配置
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Python虚拟环境
-.venv/
-.venv-1/
-__pycache__/
-
-# 临时文件
-*.tmp
-*.bak
-*.log
-```
-
-#### 6.3.10 版本标签
-
-```bash
-# 打标签（里程碑版本）
-git tag -a v1.0.0 -m "BS2x v1.0.0: 基础功能完成（寻物/盘点/配网/低功耗）"
-
-# 查看所有标签
-git tag -l
-
-# 推送标签到远程
-git push origin v1.0.0
-git push origin --tags    # 推送所有标签
-
-# 基于标签创建发布分支
-git checkout -b release/v1.0.0 v1.0.0
-```
-
-#### 6.3.11 常用场景速查表
-
-| 场景 | 命令 |
-|------|------|
-| 查看当前状态 | `git status` |
-| 查看改了什么 | `git diff` |
-| 提交单个文件 | `git add <file> && git commit -m "..."` |
-| 提交所有修改 | `git add -A && git commit -m "..."` |
-| 同步远程最新 | `git pull origin dev` |
-| 推送到远程 | `git push origin dev` |
-| 暂存当前工作 | `git stash` |
-| 恢复暂存 | `git stash pop` |
-| 查看提交历史 | `git log --oneline -20` |
-| 撤销未提交的修改 | `git checkout -- <file>` |
-| 撤销最近提交(保留修改) | `git reset --soft HEAD~1` |
-
----
 
 ## 七、当前开发方向
 
@@ -602,10 +285,11 @@ git checkout -b release/v1.0.0 v1.0.0
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| P0 | LiteOS事件驱动重构 | `osEventFlagsWait` 替换轮询，主循环 0% CPU |
-| P0 | 静态广播载荷 | 零拷贝静态 buffer，偏移量直接修改，解决内存碎片 |
-| P0 | 蜂鸣器PWM频率修复 | `BUZZER_PWM_LOW_TIME/HIGH_TIME` 从 100 改为 8000（2kHz） |
-| P0 | 与WS63联调 | 验证完整链路：ESP32→WS63→BS21E |
+| P0 | LiteOS事件驱动重构 | `osEventFlagsWait` 替换轮询，主循环 0% CPU ✅ |
+| P0 | 静态广播载荷 | 零拷贝静态 buffer，偏移量直接修改，解决内存碎片 ✅ |
+| P0 | 蜂鸣器PWM频率修复 | `BUZZER_PWM_LOW_TIME/HIGH_TIME` 从 100 改为 8000（2kHz）✅ |
+| P0 | 与WS63联调 | 验证完整链路：WS63→BS21E |
+| P0 | 入库功能 | RSSI选标签 + 绑定tag_id + TF卡存储 |
 | P1 | 硬件PWM+定时器寻物 | CPU休眠，硬件独立输出方波+定时关闭 |
 | P1 | 电池ADC采集 | 替换硬编码battery=100，实现真实电量读取 |
 | P2 | NV Flash防磨损 | qty只存RAM，定期/低电刷新Flash（延后到OTA阶段） |
@@ -645,13 +329,97 @@ Work ──(5s无活动)──> Standby ──(30s无活动)──> Sleep
 | 定时器 | `osal_timer`（软件） | 硬件 Timer/RTC 中断 |
 | 功耗 | 高（CPU + PWM） | 低（仅 PWM + Timer） |
 
-### 7.4 待确认事项
+### 7.4 已确认事项
 
-- 连接间隔单位（125μs 还是 0.25ms）
-- 出库语义（仅清qty还是解绑）
-- 多连接下的广播刷新策略
-- SLE SDK `sle_set_announce_data` 是拷贝 buffer 还是保存指针（影响零拷贝方案）
+| 项目 | 确认结果 | 说明 |
+|------|---------|------|
+| 连接间隔单位 | 0.625ms/slot | WS63端确认，0x64=62.5ms |
+| 广播间隔 | 500ms（0x0320） | 32标签场景，64次回调/秒 |
+| status语义 | 0=空闲,1=寻物,2=使用中,3=未配网 | 与WS63端统一 |
+| sle_set_announce_data | 拷贝buffer | 静态buffer方案可行 |
+
+### 7.5 待确认事项
+
 - PWM 外设在 Standby/Sleep 下是否继续输出
+- 多连接下的广播刷新策略（当前：停止→更新→重启）
+
+### 7.6 入库功能设计（RSSI选标签）
+
+#### 7.6.1 功能概述
+
+串口屏点击"入库"时，WS63通过SLE扫描获取周围标签的RSSI值，自动选择信号最强的未绑定标签，分配tag_id并存储到TF卡。
+
+#### 7.6.2 架构流程
+
+```
+┌──────────────────────┐         ┌──────────────┐
+│       WS63           │  SLE    │    BS21E     │
+│  (串口屏 + 网关)     │ ◄─────► │  (标签群)    │
+│                      │         │              │
+│  1. 扫描RSSI         │         │  持续广播    │
+│  2. 过滤未绑定标签    │         │  (含status)  │
+│  3. 选信号最强标签    │         │              │
+│  4. 连接 + 绑定      │ ──────► │  接收绑定    │
+│  5. 收到tag_id确认   │ ◄────── │  回复tag_id  │
+│  6. 存储到TF卡       │         │              │
+└──────────────────────┘         └──────────────┘
+```
+
+#### 7.6.3 详细步骤
+
+| 步骤 | 执行方 | 操作 | 说明 |
+|------|--------|------|------|
+| 1 | WS63 | SLE扫描 | 获取所有标签广播包（含RSSI值） |
+| 2 | WS63 | 过滤标签 | 只选status=3(UNBOUND)或status=0(IDLE) |
+| 3 | WS63 | RSSI排序 | 选信号最强的标签（最近距离） |
+| 4 | WS63→BS21E | 连接+绑定 | 发送0x20命令+tag_id（从池中分配） |
+| 5 | BS21E→WS63 | 回复确认 | Notify [0xA0, tag_id(2B)] |
+| 6 | WS63 | TF卡存储 | 存储：tag_id + MAC + RSSI + 时间戳 |
+
+#### 7.6.4 Status字段与绑定状态
+
+| status | 含义 | 是否可绑定 | 说明 |
+|--------|------|-----------|------|
+| 0x00 | IDLE（空闲） | ✅ 可绑定 | 已配网但未使用，可直接分配 |
+| 0x01 | FINDING（寻物中） | ❌ 不可 | 正在寻物，不可操作 |
+| 0x02 | IN_USE（使用中） | ❌ 不可 | 已绑定，有库存 |
+| 0x03 | UNBOUND（未配网） | ✅ 可绑定 | 完全空闲，需先配网 |
+
+#### 7.6.5 WS63端职责
+
+| 功能 | 说明 |
+|------|------|
+| RSSI扫描 | 扫描广播包，记录每个标签的RSSI值和MAC地址 |
+| 标签过滤 | 只选status=3(UNBOUND)或status=0(IDLE)的标签 |
+| tag_id池 | 维护可用tag_id列表，按顺序分配（1~65535） |
+| TF卡存储 | 绑定成功后存储：tag_id, MAC, RSSI, 时间戳, 状态 |
+
+#### 7.6.6 BS21E端职责（已实现）
+
+| 功能 | 对应命令 | 状态 |
+|------|---------|------|
+| 接收绑定命令 | 0x20 | ✅ 已实现 |
+| 保存tag_id到NV | storage_sync_set_tag_id() | ✅ 已实现 |
+| 回复tag_id确认 | Notify [0xA0, tag_id] | ✅ 已实现 |
+| status自动更新 | UNBOUND→IDLE/IN_USE | ✅ 已实现 |
+
+#### 7.6.7 TF卡数据结构（建议）
+
+```json
+{
+  "tags": [
+    {
+      "tag_id": 1,
+      "mac": "AA:BB:CC:DD:EE:FF",
+      "rssi": -45,
+      "bind_time": "2026-05-27 18:00:00",
+      "status": "IDLE",
+      "qty": 0,
+      "location": "A区-1架-3层"
+    }
+  ]
+}
+```
 
 ---
 

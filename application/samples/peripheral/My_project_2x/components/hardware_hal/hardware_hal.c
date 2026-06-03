@@ -5,6 +5,8 @@
 #include "gpio.h"
 #include "pinctrl.h"
 #include "pwm.h"
+#include "adc.h"
+#include "adc_porting.h"
 #include "soc_osal.h"
 
 #ifndef CONFIG_MY_PROJECT_2X_BEEP_AUTO_OFF_MS
@@ -32,6 +34,19 @@
 #endif
 
 #define HW_HAL_LOG "[BS2x_HAL]"
+
+/* 电池ADC采集参数（CR2032纽扣电池） */
+#define BATTERY_GADC_CHANNEL      GADC_CHANNEL_0   /* V153 GADC通道0 */
+#define BATTERY_VOLTAGE_MAX_MV    3000u  /* 满电电压 3.0V */
+#define BATTERY_VOLTAGE_MIN_MV    2000u  /* 截止电压 2.0V */
+#define BATTERY_LOW_THRESHOLD     10u    /* 低电量告警阈值 10% */
+#define BATTERY_PERCENT_MAX       100u
+#define BATTERY_ADC_INVALID_MV    (-1)
+
+/* ADC 是否已初始化 */
+static bool g_adc_inited = false;
+/* 电量缓存值（ADC 读取失败时使用） */
+static uint8_t g_battery_cache = BATTERY_PERCENT_MAX;
 
 /* 无源蜂鸣器PWM参数：目标2kHz，50%占空比
  * PWM时钟=32MHz，freq = 32MHz / (low_time + high_time)
@@ -337,4 +352,44 @@ hw_hal_status_t hardware_hal_led_off(void)
     }
 
     return HW_HAL_OK;
+}
+
+/* 电压转百分比：线性映射 2000~3000mV → 0~100% */
+static uint8_t hw_hal_mv_to_percent(int mv)
+{
+    if (mv >= (int)BATTERY_VOLTAGE_MAX_MV) {
+        return BATTERY_PERCENT_MAX;
+    }
+    if (mv <= (int)BATTERY_VOLTAGE_MIN_MV) {
+        return 0;
+    }
+    return (uint8_t)((mv - (int)BATTERY_VOLTAGE_MIN_MV) / 10);
+}
+
+uint8_t hw_hal_battery_read_percent(void)
+{
+    /* 首次调用时初始化 ADC */
+    if (!g_adc_inited) {
+        errcode_t ret = uapi_adc_init(ADC_CLOCK_NONE);
+        if (ret != ERRCODE_SUCC) {
+            osal_printk("%s[BP] adc_init FAIL ret:0x%x\r\n", HW_HAL_LOG, ret);
+            return g_battery_cache;
+        }
+        g_adc_inited = true;
+        osal_printk("%s[BP] adc_init OK\r\n", HW_HAL_LOG);
+    }
+
+    /* 单次采样，返回毫伏值 */
+    int mv = adc_port_gadc_entirely_sample(BATTERY_GADC_CHANNEL);
+    if (mv == BATTERY_ADC_INVALID_MV || mv < 0) {
+        osal_printk("%s[BP] adc_sample FAIL mv=%d, use cache=%u\r\n",
+                    HW_HAL_LOG, mv, g_battery_cache);
+        return g_battery_cache;
+    }
+
+    uint8_t percent = hw_hal_mv_to_percent(mv);
+    g_battery_cache = percent;
+
+    osal_printk("%s[BP] battery read mv=%d pct=%u\r\n", HW_HAL_LOG, mv, percent);
+    return percent;
 }

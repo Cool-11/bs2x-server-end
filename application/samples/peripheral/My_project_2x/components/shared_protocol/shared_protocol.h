@@ -18,9 +18,16 @@ extern "C" {
 #define SHARED_PROTO_CMD_BIND_TAG 0x20u
 #define SHARED_PROTO_CMD_UNBIND_TAG 0x21u
 
-#define SHARED_PROTO_STATUS_NORMAL   0x00u
-#define SHARED_PROTO_STATUS_FINDING  0x01u
-#define SHARED_PROTO_STATUS_OUTSTOCK 0x02u
+/* status字段语义（与WS63端对齐） */
+#define SHARED_PROTO_STATUS_IDLE         0x00u  /* 空闲：默认/寻物恢复 */
+#define SHARED_PROTO_STATUS_FINDING      0x01u  /* 寻物中：收到0x01命令 */
+#define SHARED_PROTO_STATUS_IN_USE       0x02u  /* 使用中：tag_id≠0且有库存 */
+#define SHARED_PROTO_STATUS_UNBOUND      0x03u  /* 未配网：tag_id==0 */
+#define SHARED_PROTO_STATUS_LOW_BATTERY  0x04u  /* 低电量：battery≤10%（覆盖原状态） */
+
+/* 向后兼容别名 */
+#define SHARED_PROTO_STATUS_NORMAL   SHARED_PROTO_STATUS_IDLE
+#define SHARED_PROTO_STATUS_OUTSTOCK SHARED_PROTO_STATUS_IN_USE
 
 #define SHARED_PROTO_RSP_INVENTORY 0x82u
 #define SHARED_PROTO_RSP_BIND_OK 0xA0u

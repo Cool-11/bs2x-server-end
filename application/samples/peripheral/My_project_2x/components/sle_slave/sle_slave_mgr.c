@@ -37,6 +37,16 @@
 
 #define SLE_LOCAL_NAME "BS2x_Tag"
 
+/* 静态广播载荷偏移量（相对于g_adv_payload）：
+ * [0]=AD长度 [1]=AD类型 [2-3]=厂商ID [4-7]=magic
+ * [8-9]=tag_id [10-11]=qty [12]=status [13]=battery [14-15]=seq
+ */
+#define ADV_OFFSET_TAG_ID   8u
+#define ADV_OFFSET_QTY      10u
+#define ADV_OFFSET_STATUS   12u
+#define ADV_OFFSET_BATTERY  13u
+#define ADV_OFFSET_SEQ      14u
+
 #define BS21E_APP_UUID_LEN 16
 #define BS21E_SERVICE_UUID_LEN 16
 #define BS21E_PROP_UUID_LEN 16
@@ -62,9 +72,100 @@ static uint16_t g_property_handle = 0;
 
 static uint8_t g_adv_payload[SLE_ADV_DATA_LEN_MAX_LOCAL] = {0};
 static uint16_t g_adv_payload_len = 0;
+
+/* 静态广播数据缓存（避免每次刷新重新序列化） */
+static uint8_t g_announce_data[SLE_ADV_DATA_LEN_MAX_LOCAL] = {0};
+static uint16_t g_announce_data_len = 0;
+static uint8_t g_seek_rsp_data[SLE_ADV_DATA_LEN_MAX_LOCAL] = {0};
+static uint16_t g_seek_rsp_data_len = 0;
+static bool g_announce_data_inited = false;
+
 static bool g_sle_stack_ready = false;
 static bool g_adv_started = false;
 static bool g_adv_configured = false;
+
+/* 大端序写入辅助函数 */
+static void adv_write_u16_be(uint8_t *buf, uint16_t val)
+{
+    buf[0] = (uint8_t)(val >> 8);
+    buf[1] = (uint8_t)(val & 0xFF);
+}
+
+static void adv_write_u32_be(uint8_t *buf, uint32_t val)
+{
+    buf[0] = (uint8_t)(val >> 24);
+    buf[1] = (uint8_t)((val >> 16) & 0xFF);
+    buf[2] = (uint8_t)((val >> 8) & 0xFF);
+    buf[3] = (uint8_t)(val & 0xFF);
+}
+
+/* 初始化静态广播数据缓存（只调用一次） */
+static errcode_t sle_slave_init_static_announce_data(void)
+{
+    if (g_announce_data_inited) {
+        return ERRCODE_SLE_SUCCESS;
+    }
+
+    uint16_t idx = 0;
+
+    /* Discovery Level */
+    g_announce_data[idx++] = 0x02;
+    g_announce_data[idx++] = SLE_ADV_DATA_TYPE_DISCOVERY_LEVEL;
+    g_announce_data[idx++] = SLE_ANNOUNCE_LEVEL_NORMAL;
+
+    /* Access Mode */
+    g_announce_data[idx++] = 0x02;
+    g_announce_data[idx++] = SLE_ADV_DATA_TYPE_ACCESS_MODE;
+    g_announce_data[idx++] = 0x00;
+
+    /* 厂商数据头部 */
+    uint16_t total_len = SLE_ADV_MANUFACTURER_HEADER_LEN + SHARED_PROTO_ADV_SERIALIZED_LEN;
+    g_announce_data[idx++] = (uint8_t)(total_len - 1u);
+    g_announce_data[idx++] = SLE_ADV_AD_TYPE_MANUFACTURER_SPECIFIC_DATA;
+    g_announce_data[idx++] = SLE_ADV_MANUFACTURER_ID_L;
+    g_announce_data[idx++] = SLE_ADV_MANUFACTURER_ID_H;
+
+    /* magic（固定值） */
+    adv_write_u32_be(&g_announce_data[idx], SHARED_PROTO_MAGIC);
+    idx += 4;
+
+    /* 默认值：tag_id=0, qty=0, status=UNBOUND, battery=100, seq=0 */
+    adv_write_u16_be(&g_announce_data[idx + ADV_OFFSET_TAG_ID - 8], 0);
+    adv_write_u16_be(&g_announce_data[idx + ADV_OFFSET_QTY - 8], 0);
+    g_announce_data[idx + ADV_OFFSET_STATUS - 8] = SHARED_PROTO_STATUS_UNBOUND;
+    g_announce_data[idx + ADV_OFFSET_BATTERY - 8] = 100;
+    adv_write_u16_be(&g_announce_data[idx + ADV_OFFSET_SEQ - 8], 0);
+
+    g_announce_data_len = idx + SHARED_PROTO_ADV_SERIALIZED_LEN;
+
+    /* 同步更新g_adv_payload（兼容旧代码） */
+    if (memcpy_s(g_adv_payload, sizeof(g_adv_payload),
+                 &g_announce_data[6], g_announce_data_len - 6) != EOK) {
+        return ERRCODE_SLE_FAIL;
+    }
+    g_adv_payload_len = g_announce_data_len - 6;
+
+    /* 初始化seek_rsp_data（TX功率+设备名，内容固定） */
+    uint16_t rsp_idx = 0;
+    g_seek_rsp_data[rsp_idx++] = 0x02;
+    g_seek_rsp_data[rsp_idx++] = SLE_ADV_DATA_TYPE_TX_POWER_LEVEL;
+    g_seek_rsp_data[rsp_idx++] = 0x00;
+
+    uint8_t name_len = (uint8_t)sizeof(SLE_LOCAL_NAME) - 1;
+    g_seek_rsp_data[rsp_idx++] = name_len + 1;
+    g_seek_rsp_data[rsp_idx++] = SLE_ADV_DATA_TYPE_COMPLETE_LOCAL_NAME;
+    if (memcpy_s(&g_seek_rsp_data[rsp_idx], sizeof(g_seek_rsp_data) - rsp_idx,
+                 SLE_LOCAL_NAME, name_len) != EOK) {
+        return ERRCODE_SLE_FAIL;
+    }
+    rsp_idx += name_len;
+    g_seek_rsp_data_len = rsp_idx;
+
+    g_announce_data_inited = true;
+    osal_printk("%s[BP] static announce data inited, len=%u\r\n",
+                SLE_SLAVE_LOG, g_announce_data_len);
+    return ERRCODE_SLE_SUCCESS;
+}
 
 static void sle_slave_announce_enable_cbk(uint32_t announce_id, errcode_t status)
 {
@@ -100,6 +201,100 @@ static void sle_slave_announce_terminal_cbk(uint32_t announce_id)
     osal_printk("%s announce terminal cb id:%u\r\n", SLE_SLAVE_LOG, announce_id);
 }
 
+static void sle_slave_announce_remove_cbk(uint32_t announce_id, errcode_t status)
+{
+    osal_printk("%s announce remove cb id:%u status:0x%x\r\n", SLE_SLAVE_LOG, announce_id, status);
+    if (announce_id == (uint32_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE) {
+        g_adv_started = false;
+        g_adv_configured = false;
+    }
+}
+
+static void sle_slave_seek_enable_cbk(errcode_t status)
+{
+    osal_printk("%s seek enable cb status:0x%x\r\n", SLE_SLAVE_LOG, status);
+}
+
+static void sle_slave_seek_disable_cbk(errcode_t status)
+{
+    osal_printk("%s seek disable cb status:0x%x\r\n", SLE_SLAVE_LOG, status);
+}
+
+static void sle_slave_seek_result_cbk(sle_seek_result_info_t *seek_result_data)
+{
+    unused(seek_result_data);
+}
+
+static void sle_slave_dfr_cbk(void)
+{
+    osal_printk("%s sle dfr cb\r\n", SLE_SLAVE_LOG);
+}
+
+/* 连接回调存根（防止SDK调用NULL函数指针导致mepc=0x0崩溃） */
+static void sle_stub_conn_param_update_req_cbk(uint16_t conn_id, errcode_t status,
+    const sle_connection_param_update_req_t *param)
+{ unused(conn_id); unused(status); unused(param); }
+
+static void sle_stub_conn_param_update_cbk(uint16_t conn_id, errcode_t status,
+    const sle_connection_param_update_evt_t *param)
+{ unused(conn_id); unused(status); unused(param); }
+
+static void sle_stub_auth_complete_cbk(uint16_t conn_id, const sle_addr_t *addr, errcode_t status,
+    const sle_auth_info_evt_t *info)
+{ unused(conn_id); unused(addr); unused(status); unused(info); }
+
+static void sle_stub_pair_complete_cbk(uint16_t conn_id, const sle_addr_t *addr, errcode_t status)
+{ unused(conn_id); unused(addr); unused(status); }
+
+static void sle_stub_read_rssi_cbk(uint16_t conn_id, int8_t rssi, errcode_t status)
+{ unused(conn_id); unused(rssi); unused(status); }
+
+static void sle_stub_low_latency_cbk(uint8_t status, sle_addr_t *addr, uint8_t rate)
+{ unused(status); unused(addr); unused(rate); }
+
+static void sle_stub_set_phy_cbk(uint16_t conn_id, errcode_t status, const sle_set_phy_t *param)
+{ unused(conn_id); unused(status); unused(param); }
+
+static void sle_stub_remote_private_feature_cbk(uint16_t conn_id, errcode_t status,
+    const sle_remote_private_feature_t *param)
+{ unused(conn_id); unused(status); unused(param); }
+
+static void sle_stub_passkey_req_cbk(uint16_t conn_id)
+{ unused(conn_id); }
+
+static void sle_stub_passkey_notify_cbk(uint16_t conn_id, const uint8_t *passkey, const uint8_t len)
+{ unused(conn_id); unused(passkey); unused(len); }
+
+/* SSAP回调存根 */
+static void ssaps_stub_add_service_cbk(uint8_t server_id, sle_uuid_t *uuid, uint16_t handle, errcode_t status)
+{ unused(server_id); unused(uuid); unused(handle); unused(status); }
+
+static void ssaps_stub_add_property_cbk(uint8_t server_id, sle_uuid_t *uuid,
+    uint16_t service_handle, uint16_t handle, errcode_t status)
+{ unused(server_id); unused(uuid); unused(service_handle); unused(handle); unused(status); }
+
+static void ssaps_stub_add_descriptor_cbk(uint8_t server_id, sle_uuid_t *uuid,
+    uint16_t service_handle, uint16_t handle, errcode_t status)
+{ unused(server_id); unused(uuid); unused(service_handle); unused(handle); unused(status); }
+
+static void ssaps_stub_start_service_cbk(uint8_t server_id, uint16_t handle, errcode_t status)
+{ unused(server_id); unused(handle); unused(status); }
+
+static void ssaps_stub_delete_all_service_cbk(uint8_t server_id, errcode_t status)
+{ unused(server_id); unused(status); }
+
+static void ssaps_stub_read_by_uuid_request_cbk(uint8_t server_id, uint16_t conn_id,
+    ssaps_req_read_by_uuid_cb_t *read_cb_para, errcode_t status)
+{ unused(server_id); unused(conn_id); unused(read_cb_para); unused(status); }
+
+static void ssaps_stub_indicate_cfm_cbk(uint8_t server_id, uint16_t conn_id,
+    sle_indication_cfm_result_t cfm_result, errcode_t status)
+{ unused(server_id); unused(conn_id); unused(cfm_result); unused(status); }
+
+static void ssaps_stub_mtu_changed_cbk(uint8_t server_id, uint16_t conn_id,
+    ssap_exchange_info_t *info, errcode_t status)
+{ unused(server_id); unused(conn_id); unused(info); unused(status); }
+
 static errcode_t sle_slave_start_announce_if_needed(void)
 {
     if (!g_sle_stack_ready) {
@@ -132,95 +327,41 @@ static errcode_t sle_slave_stop_announce_if_needed(void)
     return ret;
 }
 
-static errcode_t sle_slave_update_announce_data(void)
+/* 基于偏移量更新广播字段（零拷贝，只修改变化的字节） */
+static void sle_slave_update_adv_field_by_offset(const shared_proto_adv_field_t *field)
 {
-    uint8_t announce_data[SLE_ADV_DATA_LEN_MAX_LOCAL] = {0};
-    uint16_t idx = 0;
+    /* announce_data中厂商数据起始偏移=6（discovery+access+header） */
+    uint16_t base = 6 + SLE_ADV_MANUFACTURER_HEADER_LEN;
 
-    announce_data[idx++] = 0x02;
-    announce_data[idx++] = SLE_ADV_DATA_TYPE_DISCOVERY_LEVEL;
-    announce_data[idx++] = SLE_ANNOUNCE_LEVEL_NORMAL;
+    adv_write_u16_be(&g_announce_data[base + ADV_OFFSET_TAG_ID], field->tag_id);
+    adv_write_u16_be(&g_announce_data[base + ADV_OFFSET_QTY], field->qty);
+    g_announce_data[base + ADV_OFFSET_STATUS] = field->status;
+    g_announce_data[base + ADV_OFFSET_BATTERY] = field->battery;
+    adv_write_u16_be(&g_announce_data[base + ADV_OFFSET_SEQ], field->seq);
 
-    announce_data[idx++] = 0x02;
-    announce_data[idx++] = SLE_ADV_DATA_TYPE_ACCESS_MODE;
-    announce_data[idx++] = 0x00;
+    /* 同步更新g_adv_payload（兼容旧代码） */
+    adv_write_u16_be(&g_adv_payload[ADV_OFFSET_TAG_ID], field->tag_id);
+    adv_write_u16_be(&g_adv_payload[ADV_OFFSET_QTY], field->qty);
+    g_adv_payload[ADV_OFFSET_STATUS] = field->status;
+    g_adv_payload[ADV_OFFSET_BATTERY] = field->battery;
+    adv_write_u16_be(&g_adv_payload[ADV_OFFSET_SEQ], field->seq);
 
-    if (g_adv_payload_len > 0 && idx + g_adv_payload_len <= SLE_ADV_DATA_LEN_MAX_LOCAL) {
-        if (memcpy_s(&announce_data[idx], SLE_ADV_DATA_LEN_MAX_LOCAL - idx,
-                     g_adv_payload, g_adv_payload_len) != EOK) {
-            osal_printk("%s memcpy adv payload fail\r\n", SLE_SLAVE_LOG);
-            return ERRCODE_SLE_FAIL;
-        }
-        idx += g_adv_payload_len;
-    }
-
-    uint8_t seek_rsp_data[SLE_ADV_DATA_LEN_MAX_LOCAL] = {0};
-    uint16_t rsp_idx = 0;
-
-    seek_rsp_data[rsp_idx++] = 0x02;
-    seek_rsp_data[rsp_idx++] = SLE_ADV_DATA_TYPE_TX_POWER_LEVEL;
-    seek_rsp_data[rsp_idx++] = 0x00;
-
-    uint8_t name_len = (uint8_t)sizeof(SLE_LOCAL_NAME) - 1;
-    seek_rsp_data[rsp_idx++] = name_len + 1;
-    seek_rsp_data[rsp_idx++] = SLE_ADV_DATA_TYPE_COMPLETE_LOCAL_NAME;
-    if (memcpy_s(&seek_rsp_data[rsp_idx], SLE_ADV_DATA_LEN_MAX_LOCAL - rsp_idx,
-                 SLE_LOCAL_NAME, name_len) != EOK) {
-        osal_printk("%s memcpy local name fail\r\n", SLE_SLAVE_LOG);
-        return ERRCODE_SLE_FAIL;
-    }
-    rsp_idx += name_len;
-
-    sle_announce_data_t data = {0};
-    data.announce_data = announce_data;
-    data.announce_data_len = idx;
-    data.seek_rsp_data = seek_rsp_data;
-    data.seek_rsp_data_len = rsp_idx;
-
-    osal_printk("%s announce_data_len=%u seek_rsp_data_len=%u\r\n",
-                SLE_SLAVE_LOG, idx, rsp_idx);
-
-    return sle_set_announce_data((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE, &data);
+    osal_printk("%s[BP] update_by_offset tag:%u qty:%u status:0x%02x\r\n",
+                SLE_SLAVE_LOG, field->tag_id, field->qty, field->status);
 }
 
-static errcode_t sle_slave_encode_manufacturer_adv(const shared_proto_adv_field_t *field)
+static errcode_t sle_slave_update_announce_data(void)
 {
-    osal_printk("%s Entering sle_slave_encode_manufacturer_adv\r\n", SLE_SLAVE_LOG);
+    sle_announce_data_t data = {0};
+    data.announce_data = g_announce_data;
+    data.announce_data_len = g_announce_data_len;
+    data.seek_rsp_data = g_seek_rsp_data;
+    data.seek_rsp_data_len = g_seek_rsp_data_len;
 
-    if (field == NULL || !shared_proto_adv_field_is_valid(field)) {
-        osal_printk("%s adv field invalid\r\n", SLE_SLAVE_LOG);
-        return ERRCODE_SLE_PARAM_ERR;
-    }
+    osal_printk("%s announce_data_len=%u seek_rsp_data_len=%u\r\n",
+                SLE_SLAVE_LOG, g_announce_data_len, g_seek_rsp_data_len);
 
-    uint16_t total_len = SLE_ADV_MANUFACTURER_HEADER_LEN + SHARED_PROTO_ADV_SERIALIZED_LEN;
-    if (total_len > sizeof(g_adv_payload)) {
-        return ERRCODE_SLE_PARAM_ERR;
-    }
-
-    g_adv_payload[0] = (uint8_t)(total_len - 1u);
-    g_adv_payload[1] = SLE_ADV_AD_TYPE_MANUFACTURER_SPECIFIC_DATA;
-    g_adv_payload[2] = SLE_ADV_MANUFACTURER_ID_L;
-    g_adv_payload[3] = SLE_ADV_MANUFACTURER_ID_H;
-
-    uint16_t serialized = shared_proto_serialize_adv_field(
-        field, &g_adv_payload[SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET],
-        sizeof(g_adv_payload) - SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET);
-    if (serialized != SHARED_PROTO_ADV_SERIALIZED_LEN) {
-        osal_printk("%s serialize adv FAIL got:%u expect:%u\r\n",
-                    SLE_SLAVE_LOG, serialized, SHARED_PROTO_ADV_SERIALIZED_LEN);
-        return ERRCODE_SLE_FAIL;
-    }
-
-    g_adv_payload_len = total_len;
-
-    osal_printk("%s adv payload first 4 bytes: 0x%02X 0x%02X 0x%02X 0x%02X (expect 0xAA 0xBB 0xCC 0xDD)\r\n",
-                SLE_SLAVE_LOG,
-                g_adv_payload[SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET],
-                g_adv_payload[SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET + 1],
-                g_adv_payload[SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET + 2],
-                g_adv_payload[SLE_ADV_MANUFACTURER_PAYLOAD_OFFSET + 3]);
-
-    return ERRCODE_SLE_SUCCESS;
+    return sle_set_announce_data((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE, &data);
 }
 
 static void sle_slave_add_connection(uint16_t conn_id)
@@ -330,17 +471,37 @@ static errcode_t sle_slave_register_callbacks(void)
 {
     osal_printk("%s Entering sle_slave_register_callbacks\r\n", SLE_SLAVE_LOG);
 
+    /* 连接回调：补全所有11个字段 */
     sle_connection_callbacks_t conn_cbks = {0};
     conn_cbks.connect_state_changed_cb = sle_slave_connect_state_changed_cbk;
+    conn_cbks.connect_param_update_req_cb = sle_stub_conn_param_update_req_cbk;
+    conn_cbks.connect_param_update_cb = sle_stub_conn_param_update_cbk;
+    conn_cbks.auth_complete_cb = sle_stub_auth_complete_cbk;
+    conn_cbks.pair_complete_cb = sle_stub_pair_complete_cbk;
+    conn_cbks.read_rssi_cb = sle_stub_read_rssi_cbk;
+    conn_cbks.low_latency_cb = sle_stub_low_latency_cbk;
+    conn_cbks.set_phy_cb = sle_stub_set_phy_cbk;
+    conn_cbks.remote_private_feature = sle_stub_remote_private_feature_cbk;
+    conn_cbks.passkey_req_cb = sle_stub_passkey_req_cbk;
+    conn_cbks.passkey_notify_cb = sle_stub_passkey_notify_cbk;
     errcode_t ret = sle_connection_register_callbacks(&conn_cbks);
     if (ret != ERRCODE_SLE_SUCCESS) {
         osal_printk("%s sle_connection_register_callbacks fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
     }
 
+    /* SSAP回调：补全所有10个字段 */
     ssaps_callbacks_t ssaps_cbk = {0};
-    ssaps_cbk.write_request_cb = ssaps_server_write_request_cbk;
+    ssaps_cbk.add_service_cb = ssaps_stub_add_service_cbk;
+    ssaps_cbk.add_property_cb = ssaps_stub_add_property_cbk;
+    ssaps_cbk.add_descriptor_cb = ssaps_stub_add_descriptor_cbk;
+    ssaps_cbk.start_service_cb = ssaps_stub_start_service_cbk;
+    ssaps_cbk.delete_all_service_cb = ssaps_stub_delete_all_service_cbk;
     ssaps_cbk.read_request_cb = ssaps_server_read_request_cbk;
+    ssaps_cbk.read_by_uuid_request_cb = ssaps_stub_read_by_uuid_request_cbk;
+    ssaps_cbk.write_request_cb = ssaps_server_write_request_cbk;
+    ssaps_cbk.indicate_cfm_cb = ssaps_stub_indicate_cfm_cbk;
+    ssaps_cbk.mtu_changed_cb = ssaps_stub_mtu_changed_cbk;
     ret = ssaps_register_callbacks(&ssaps_cbk);
     if (ret != ERRCODE_SLE_SUCCESS) {
         osal_printk("%s ssaps_register_callbacks fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
@@ -372,17 +533,12 @@ static errcode_t sle_slave_ensure_unique_mac(sle_addr_t *addr)
         }
     }
 
-    /* 种子 = 时间戳 XOR 芯片唯一ID，增加随机性 */
+    /* 种子 = 时间戳，生成随机MAC（V153不支持efuse_get_chip_id） */
+    osal_printk("%s [DBG-MAC-1] generating new mac\r\n", SLE_SLAVE_LOG);
     uint32_t seed = (uint32_t)(uapi_tcxo_get_ms() & 0xFFFFFFFF);
+    osal_printk("%s [DBG-MAC-2] tcxo seed=0x%x\r\n", SLE_SLAVE_LOG, seed);
     if (seed == 0) {
         seed = 0xDEADBEEF;
-    }
-    /* 混入 chip_id（如果可用） */
-    uint8_t chip_id[8] = {0};
-    if (uapi_efuse_get_chip_id(chip_id, sizeof(chip_id)) == ERRCODE_SUCC) {
-        for (uint8_t i = 0; i < sizeof(chip_id); i++) {
-            seed ^= (uint32_t)chip_id[i] << ((i % 4) * 8);
-        }
     }
     for (uint8_t i = 0; i < SLE_ADDR_LEN; i++) {
         seed = seed * 1103515245 + 12345;
@@ -406,7 +562,7 @@ static errcode_t sle_slave_ensure_unique_mac(sle_addr_t *addr)
 
 static errcode_t sle_slave_setup_announce(void)
 {
-    osal_printk("%s Entering sle_slave_setup_announce\r\n", SLE_SLAVE_LOG);
+    osal_printk("%s [DBG-1] Entering setup_announce\r\n", SLE_SLAVE_LOG);
 
     sle_announce_param_t param = {0};
     param.announce_handle = (uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE;
@@ -414,8 +570,9 @@ static errcode_t sle_slave_setup_announce(void)
     param.announce_gt_role = SLE_ANNOUNCE_ROLE_T_CAN_NEGO;
     param.announce_level = SLE_ANNOUNCE_LEVEL_NORMAL;
     param.announce_channel_map = 0x07;
-    param.announce_interval_min = 0xC8;
-    param.announce_interval_max = 0xC8;
+    /* 广播间隔500ms（0x0FA0 × 0.125ms = 500ms），SLE单位是125us不是BLE的625us */
+    param.announce_interval_min = 0x0FA0;
+    param.announce_interval_max = 0x0FA0;
     param.conn_interval_min = 0x64;
     param.conn_interval_max = 0x64;
     param.conn_max_latency = 0x0F;
@@ -423,8 +580,13 @@ static errcode_t sle_slave_setup_announce(void)
     param.announce_tx_power = 0;
     param.own_addr.type = 0;
 
+    osal_printk("%s [DBG-2] param filled, addr=%p\r\n", SLE_SLAVE_LOG, (void *)&param);
+
     sle_addr_t local_addr = {0};
-    if (sle_slave_ensure_unique_mac(&local_addr) == ERRCODE_SUCC) {
+    osal_printk("%s [DBG-3] before ensure_unique_mac\r\n", SLE_SLAVE_LOG);
+    errcode_t mac_ret = sle_slave_ensure_unique_mac(&local_addr);
+    osal_printk("%s [DBG-4] ensure_unique_mac ret=0x%x\r\n", SLE_SLAVE_LOG, mac_ret);
+    if (mac_ret == ERRCODE_SUCC) {
         param.own_addr.type = local_addr.type;
         if (memcpy_s(param.own_addr.addr, SLE_ADDR_LEN, local_addr.addr, SLE_ADDR_LEN) != EOK) {
             osal_printk("%s memcpy local addr fail\r\n", SLE_SLAVE_LOG);
@@ -440,7 +602,9 @@ static errcode_t sle_slave_setup_announce(void)
         }
     }
 
+    osal_printk("%s [DBG-3] before sle_set_announce_param handle=%u\r\n", SLE_SLAVE_LOG, param.announce_handle);
     errcode_t ret = sle_set_announce_param(param.announce_handle, &param);
+    osal_printk("%s [DBG-4] after sle_set_announce_param ret=0x%x\r\n", SLE_SLAVE_LOG, ret);
     if (ret != ERRCODE_SLE_SUCCESS) {
         osal_printk("%s sle_set_announce_param fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
@@ -525,22 +689,8 @@ static void sle_slave_power_on_cbk(uint8_t status)
 
 static void sle_slave_enable_cbk(uint8_t status)
 {
-    osal_printk("[BS2x_INIT][BP] sle enable cbk status:%u\r\n", status);
-
-    errcode_t ret;
-    ret = sle_slave_register_callbacks();
-    osal_printk("[BS2x_INIT][BP] register_callbacks ret:0x%x\r\n", ret);
-
-    ret = sle_slave_setup_ssap_server();
-    osal_printk("[BS2x_INIT][BP] setup_ssap ret:0x%x server_id:%u svc_hdl:0x%x prop_hdl:0x%x\r\n",
-                ret, g_server_id, g_service_handle, g_property_handle);
-
-    ret = sle_slave_setup_announce();
-    osal_printk("[BS2x_INIT][BP] setup_announce ret:0x%x configured:%u\r\n", ret, g_adv_configured);
-
-    g_sle_stack_ready = true;
-    ret = sle_slave_start_announce_if_needed();
-    osal_printk("[BS2x_INIT][BP] start_announce ret:0x%x started:%u\r\n", ret, g_adv_started);
+    osal_printk("[BS2x_INIT] sle enable cbk status:%u\r\n", status);
+    /* 初始化全部在 sle_slave_init 中完成，此处仅做状态通知 */
 }
 
 errcode_t sle_slave_init(const sle_slave_callbacks_t *cb)
@@ -553,40 +703,81 @@ errcode_t sle_slave_init(const sle_slave_callbacks_t *cb)
         (void)memset_s(&g_cb, sizeof(g_cb), 0, sizeof(g_cb));
     }
 
-    shared_proto_adv_field_t default_field = {
-        .magic = SHARED_PROTO_MAGIC,
-        .tag_id = 0,
-        .qty = 0,
-        .status = 0,
-        .battery = 100,
-        .seq = 0,
-    };
-    (void)sle_slave_encode_manufacturer_adv(&default_field);
+    /* 初始化静态广播数据缓存 */
+    errcode_t init_ret = sle_slave_init_static_announce_data();
+    if (init_ret != ERRCODE_SLE_SUCCESS) {
+        osal_printk("%s init static announce data fail:0x%x\r\n", SLE_SLAVE_LOG, init_ret);
+    }
 
+    /* Step1: 注册设备管理回调 */
     sle_dev_manager_callbacks_t dev_cb = {0};
     dev_cb.sle_power_on_cb = sle_slave_power_on_cbk;
     dev_cb.sle_enable_cb = sle_slave_enable_cbk;
-
     errcode_t ret = sle_dev_manager_register_callbacks(&dev_cb);
     if (ret != ERRCODE_SLE_SUCCESS) {
         osal_printk("%s sle_dev_manager_register_callbacks fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
     }
+    osal_printk("[BS2x_INIT] dev_manager registered\r\n");
 
+    /* Step2: 使能SLE协议栈 */
+#if (CORE_NUMS < 2)
+    if (enable_sle() != ERRCODE_SUCC) {
+        osal_printk("[BS2x_INIT] enable_sle fail\r\n");
+        return ERRCODE_SLE_FAIL;
+    }
+    osal_printk("[BS2x_INIT] enable_sle ok\r\n");
+#endif
+
+    /* Step3: 注册广播/扫描回调（官方示例：先于连接/SSAP注册） */
     sle_announce_seek_callbacks_t announce_cb = {0};
     announce_cb.announce_enable_cb = sle_slave_announce_enable_cbk;
     announce_cb.announce_disable_cb = sle_slave_announce_disable_cbk;
     announce_cb.announce_terminal_cb = sle_slave_announce_terminal_cbk;
+    announce_cb.announce_remove_cb = sle_slave_announce_remove_cbk;
+    announce_cb.seek_enable_cb = sle_slave_seek_enable_cbk;
+    announce_cb.seek_disable_cb = sle_slave_seek_disable_cbk;
+    announce_cb.seek_result_cb = sle_slave_seek_result_cbk;
+    announce_cb.sle_dfr_cb = sle_slave_dfr_cbk;
     ret = sle_announce_seek_register_callbacks(&announce_cb);
     if (ret != ERRCODE_SLE_SUCCESS) {
         osal_printk("%s sle_announce_seek_register_callbacks fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
     }
+    osal_printk("[BS2x_INIT] announce_seek registered\r\n");
 
-#if (CORE_NUMS < 2)
-    enable_sle();
-#endif
+    /* Step4: 注册连接管理回调 */
+    ret = sle_slave_register_callbacks();
+    if (ret != ERRCODE_SLE_SUCCESS) {
+        osal_printk("[BS2x_INIT] register_callbacks fail:0x%x\r\n", ret);
+        return ret;
+    }
+    osal_printk("[BS2x_INIT] connection+ssap registered\r\n");
 
+    /* Step5: 设置SSAP服务（官方示例：先于广播参数设置） */
+    ret = sle_slave_setup_ssap_server();
+    osal_printk("[BS2x_INIT] setup_ssap ret:0x%x server_id:%u svc_hdl:0x%x prop_hdl:0x%x\r\n",
+                ret, g_server_id, g_service_handle, g_property_handle);
+    if (ret != ERRCODE_SLE_SUCCESS) {
+        return ret;
+    }
+
+    /* Step6: 设置广播参数+数据（官方示例：最后设置并启动） */
+    ret = sle_slave_setup_announce();
+    osal_printk("[BS2x_INIT] setup_announce ret:0x%x configured:%u\r\n", ret, g_adv_configured);
+    if (ret != ERRCODE_SLE_SUCCESS) {
+        return ret;
+    }
+
+    /* Step7: 启动广播 */
+    g_sle_stack_ready = true;
+    ret = sle_start_announce((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE);
+    osal_printk("[BS2x_INIT] start_announce ret:0x%x\r\n", ret);
+    if (ret == ERRCODE_SLE_SUCCESS) {
+        g_adv_started = true;
+    }
+
+    osal_printk("[BS2x_INIT] sle_slave_init complete\r\n");
     return ERRCODE_SLE_SUCCESS;
 }
 
@@ -612,11 +803,15 @@ errcode_t sle_slave_refresh_adv_payload(const shared_proto_adv_field_t *field)
     osal_printk("%s[BP] refresh_adv tag:%u qty:%u status:0x%02x seq:%u\r\n",
                 SLE_SLAVE_LOG, field->tag_id, field->qty, field->status, field->seq);
 
-    errcode_t ret = sle_slave_encode_manufacturer_adv(field);
+    /* 确保静态buffer已初始化 */
+    errcode_t ret = sle_slave_init_static_announce_data();
     if (ret != ERRCODE_SLE_SUCCESS) {
-        osal_printk("%s encode adv failed ret:0x%x\r\n", SLE_SLAVE_LOG, ret);
+        osal_printk("%s init static announce data fail ret:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
     }
+
+    /* 基于偏移量更新字段（零拷贝，只修改变化的字节） */
+    sle_slave_update_adv_field_by_offset(field);
 
     if (!g_sle_stack_ready) {
         osal_printk("%s sle not ready, cached adv payload only\r\n", SLE_SLAVE_LOG);
