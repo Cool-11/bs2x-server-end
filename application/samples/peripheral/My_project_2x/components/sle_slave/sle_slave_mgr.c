@@ -136,7 +136,7 @@ static errcode_t sle_slave_init_static_announce_data(void)
     g_announce_data[idx + ADV_OFFSET_BATTERY - 8] = 100;
     adv_write_u16_be(&g_announce_data[idx + ADV_OFFSET_SEQ - 8], 0);
 
-    g_announce_data_len = idx + SHARED_PROTO_ADV_SERIALIZED_LEN;
+    g_announce_data_len = idx + SHARED_PROTO_ADV_SERIALIZED_LEN - 4;  /* idx已含magic 4字节，减去避免重复计算 */
 
     /* 同步更新g_adv_payload（兼容旧代码） */
     if (memcpy_s(g_adv_payload, sizeof(g_adv_payload),
@@ -164,6 +164,15 @@ static errcode_t sle_slave_init_static_announce_data(void)
     g_announce_data_inited = true;
     osal_printk("%s[BP] static announce data inited, len=%u\r\n",
                 SLE_SLAVE_LOG, g_announce_data_len);
+
+    /* hex dump: 确认 g_announce_data 初始化内容 */
+    osal_printk("%s[BP] announce hex dump:\r\n", SLE_SLAVE_LOG);
+    for (uint16_t i = 0; i < g_announce_data_len && i < 22; i++) {
+        osal_printk("%02X ", g_announce_data[i]);
+        if ((i + 1) % 11 == 0) osal_printk("\r\n");
+    }
+    osal_printk("\r\n");
+
     return ERRCODE_SLE_SUCCESS;
 }
 
@@ -330,8 +339,8 @@ static errcode_t sle_slave_stop_announce_if_needed(void)
 /* 基于偏移量更新广播字段（零拷贝，只修改变化的字节） */
 static void sle_slave_update_adv_field_by_offset(const shared_proto_adv_field_t *field)
 {
-    /* announce_data中厂商数据起始偏移=6（discovery+access+header） */
-    uint16_t base = 6 + SLE_ADV_MANUFACTURER_HEADER_LEN;
+    /* announce_data中厂商数据起始偏移=6（discovery+access），ADV_OFFSET已含header */
+    uint16_t base = 6;
 
     adv_write_u16_be(&g_announce_data[base + ADV_OFFSET_TAG_ID], field->tag_id);
     adv_write_u16_be(&g_announce_data[base + ADV_OFFSET_QTY], field->qty);
@@ -361,7 +370,17 @@ static errcode_t sle_slave_update_announce_data(void)
     osal_printk("%s announce_data_len=%u seek_rsp_data_len=%u\r\n",
                 SLE_SLAVE_LOG, g_announce_data_len, g_seek_rsp_data_len);
 
-    return sle_set_announce_data((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE, &data);
+    errcode_t ret = sle_set_announce_data((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE, &data);
+
+    /* hex dump: 确认传给协议栈的实际数据 */
+    osal_printk("%s[BP] adv after set ret=0x%x, hex dump:\r\n", SLE_SLAVE_LOG, ret);
+    for (uint16_t i = 0; i < g_announce_data_len && i < 22; i++) {
+        osal_printk("%02X ", g_announce_data[i]);
+        if ((i + 1) % 11 == 0) osal_printk("\r\n");
+    }
+    osal_printk("\r\n");
+
+    return ret;
 }
 
 static void sle_slave_add_connection(uint16_t conn_id)
@@ -609,6 +628,12 @@ static errcode_t sle_slave_setup_announce(void)
         osal_printk("%s sle_set_announce_param fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
         return ret;
     }
+
+    osal_printk("%s[BP] adv params handle:%u ch_map:0x%02x interval:%u(~%ums) mode:%u\r\n",
+                SLE_SLAVE_LOG, param.announce_handle, param.announce_channel_map,
+                param.announce_interval_min,
+                param.announce_interval_min * 125 / 1000,
+                param.announce_mode);
 
     ret = sle_slave_update_announce_data();
     if (ret != ERRCODE_SLE_SUCCESS) {
@@ -906,5 +931,51 @@ errcode_t sle_slave_notify_conn(uint16_t conn_id, const uint8_t *data, uint16_t 
     } else {
         osal_printk("%s[BP] notify OK conn_id:0x%x len:%u\r\n", SLE_SLAVE_LOG, conn_id, len);
     }
+    return ret;
+}
+
+errcode_t sle_slave_reset_mac(void)
+{
+    osal_printk("%s[BP] RESET_MAC start\r\n", SLE_SLAVE_LOG);
+
+    /* 1. 停止广播 */
+    errcode_t ret = sle_slave_stop_announce_if_needed();
+    if (ret != ERRCODE_SLE_SUCCESS) {
+        osal_printk("%s stop announce fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
+    }
+
+    /* 2. 清除NV中的MAC，强制重新生成 */
+    uint8_t zero[SLE_ADDR_LEN] = {0};
+    ret = uapi_nv_write(NV_ID_BS2X_CUSTOM_MAC, zero, SLE_ADDR_LEN);
+    if (ret != ERRCODE_SUCC) {
+        osal_printk("%s nv clear mac fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
+        return ret;
+    }
+
+    /* 3. 生成新MAC并写入NV */
+    sle_addr_t new_addr = {0};
+    ret = sle_slave_ensure_unique_mac(&new_addr);
+    if (ret != ERRCODE_SUCC) {
+        osal_printk("%s generate new mac fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
+        return ret;
+    }
+
+    /* 4. 重新设置广播参数（含新MAC） */
+    ret = sle_slave_setup_announce();
+    if (ret != ERRCODE_SLE_SUCCESS) {
+        osal_printk("%s setup_announce fail:0x%x\r\n", SLE_SLAVE_LOG, ret);
+        return ret;
+    }
+
+    /* 5. 重启广播 */
+    g_sle_stack_ready = true;
+    ret = sle_start_announce((uint8_t)CONFIG_MY_PROJECT_2X_SLE_ADV_HANDLE);
+    if (ret == ERRCODE_SLE_SUCCESS) {
+        g_adv_started = true;
+    }
+
+    osal_printk("%s[BP] RESET_MAC done new MAC: %02X:%02X:%02X:%02X:%02X:%02X ret:0x%x\r\n",
+                SLE_SLAVE_LOG, new_addr.addr[0], new_addr.addr[1], new_addr.addr[2],
+                new_addr.addr[3], new_addr.addr[4], new_addr.addr[5], ret);
     return ret;
 }

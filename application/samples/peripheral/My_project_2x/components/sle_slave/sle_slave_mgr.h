@@ -38,6 +38,8 @@ uint8_t sle_slave_get_active_conn_count(void);
 errcode_t sle_slave_broadcast_notify_all(const uint8_t *data, uint16_t len);
 errcode_t sle_slave_notify_conn(uint16_t conn_id, const uint8_t *data, uint16_t len);
 
+errcode_t sle_slave_reset_mac(void);
+
 #ifdef __cplusplus
 }
 #endif

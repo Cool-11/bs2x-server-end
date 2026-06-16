@@ -155,6 +155,13 @@ static void my_project_2x_uart_selftest_exec(const uint8_t *data, uint16_t len)
         return;
     }
 
+    /* 文本命令处理（优先于SLE协议解析） */
+    if (len == 9 && memcmp(data, "RESET_MAC", 9) == 0) {
+        osal_printk("%s[UART_TEST] >> RESET_MAC\r\n", MY_PROJECT_2X_LOG);
+        (void)sle_slave_reset_mac();
+        return;
+    }
+
     shared_proto_unicast_cmd_t cmd = {0};
     bool parsed = shared_proto_parse_unicast_cmd(data, len, &cmd);
     if (!parsed) {
