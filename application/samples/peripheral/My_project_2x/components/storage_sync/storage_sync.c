@@ -140,6 +140,12 @@ errcode_t storage_sync_set_tag_id(uint16_t tag_id)
         return ERRCODE_FAIL;
     }
 
+    /* tag_id=0 是"未配网"哨兵值，禁止作为合法绑定目标 */
+    if (tag_id == 0) {
+        osal_printk("%s[BP] set_tag_id FAIL: tag_id=0 is reserved (UNBOUND)\r\n", STORAGE_SYNC_LOG);
+        return ERRCODE_FAIL;
+    }
+
     /* 重复绑定相同 tag_id，跳过 NV 写入延长寿命 */
     if (g_sync.field.tag_id == tag_id) {
         osal_printk("%s[BP] set_tag_id=%u same, skip NV write\r\n", STORAGE_SYNC_LOG, tag_id);
